@@ -181,6 +181,14 @@ export function dataGridSaveExecutionSchema(
   return tableMeta?.schema;
 }
 
+export function normalizeDataGridSaveError(databaseType: DatabaseType | undefined, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (databaseType === "hive" && /Attempt to do update or delete|Error 10294/i.test(message)) {
+    return "Hive UPDATE/DELETE are not enabled for this table or server. Add rows with INSERT, or enable ACID transactional tables in Hive before editing/deleting existing rows.";
+  }
+  return message;
+}
+
 export function formatGridSqlLiteral(value: GridCellValue, databaseType?: DatabaseType): string {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
@@ -197,6 +205,7 @@ function buildPrimaryKeyWhere(
   columns: string[],
   row: GridCellValue[],
 ): string {
+  if (databaseType === "hive" && primaryKeys.length === 0) return buildRowWhere(databaseType, columns, row);
   return primaryKeys
     .map((primaryKey) => {
       const value = row[columns.indexOf(primaryKey)];

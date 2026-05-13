@@ -17,6 +17,7 @@ const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryCh
 import { useQueryStore } from "@/stores/queryStore";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab } from "@/lib/tabPresentation";
+import { isTableDataEditable } from "@/lib/tableEditing";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 
@@ -390,7 +391,7 @@ defineExpose({ focusSearch });
           :result="activeTab.result"
           :sql="activeTab.sql"
           :loading="activeTab.isExecuting"
-          :editable="!!activeTab.tableMeta?.primaryKeys?.length"
+          :editable="isTableDataEditable(activeConnection?.db_type, activeTab.tableMeta?.primaryKeys ?? [])"
           context="table-data"
           :initial-where-input="activeTab.whereInput"
           :database-type="activeConnection?.db_type"

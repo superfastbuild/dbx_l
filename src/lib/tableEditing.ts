@@ -10,6 +10,15 @@ export function editablePrimaryKeys(databaseType: DatabaseType | undefined, colu
   return primaryKeys;
 }
 
+export function isTableDataEditable(databaseType: DatabaseType | undefined, primaryKeys: string[]): boolean {
+  if (databaseType === "hive") return true;
+  return primaryKeys.length > 0;
+}
+
+export function supportsDataGridTransaction(databaseType: DatabaseType | undefined): boolean {
+  return databaseType !== "hive";
+}
+
 export function usesSyntheticRowIdKey(databaseType: DatabaseType | undefined, primaryKeys: string[]): boolean {
   return (
     primaryKeys.length === 1 &&

@@ -5,6 +5,8 @@ import {
   DBX_ROWID_COLUMN,
   editablePrimaryKeys,
   isHiddenGridColumn,
+  isTableDataEditable,
+  supportsDataGridTransaction,
   usesSyntheticRowIdKey,
 } from "../src/lib/tableEditing.ts";
 import type { ColumnInfo } from "../src/types/database.ts";
@@ -30,6 +32,17 @@ test("keeps declared primary keys ahead of Oracle ROWID fallback", () => {
 
 test("does not synthesize ROWID for non-Oracle keyless tables", () => {
   assert.deepEqual(editablePrimaryKeys("mysql", [column("ID"), column("CITY")]), []);
+});
+
+test("allows Hive table data editing even without declared primary keys", () => {
+  assert.equal(isTableDataEditable("hive", []), true);
+  assert.equal(isTableDataEditable("mysql", []), false);
+  assert.equal(isTableDataEditable("postgres", ["id"]), true);
+});
+
+test("does not use transactional grid saves for Hive", () => {
+  assert.equal(supportsDataGridTransaction("hive"), false);
+  assert.equal(supportsDataGridTransaction("postgres"), true);
 });
 
 test("uses elementId as Neo4j editable key when labels have no primary key", () => {

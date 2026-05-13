@@ -4,6 +4,7 @@ import {
   buildDataGridRollbackStatements,
   buildDataGridSaveStatements,
   dataGridSaveExecutionSchema,
+  normalizeDataGridSaveError,
   validateDataGridSave,
 } from "../src/lib/dataGridSql.ts";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN } from "../src/lib/tableEditing.ts";
@@ -56,6 +57,26 @@ test("builds Hive grid save statements with backtick identifiers", () => {
     "UPDATE `department states` SET `display name` = 'Marketing' WHERE `dept id` = 10;",
     "DELETE FROM `department states` WHERE `dept id` = 10;",
     "INSERT INTO `department states` (`dept id`, `display name`) VALUES (20, 'Engineering');",
+  ]);
+});
+
+test("builds Hive grid save statements without primary keys using row predicates", () => {
+  const statements = buildDataGridSaveStatements({
+    databaseType: "hive",
+    tableMeta: {
+      tableName: "departments",
+      primaryKeys: [],
+    },
+    columns: ["id", "name", "location"],
+    rows: [[10, "Sales", null]],
+    dirtyRows: [[0, [[1, "Marketing"]]]],
+    deletedRows: [0],
+    newRows: [],
+  });
+
+  assert.deepEqual(statements, [
+    "UPDATE `departments` SET `name` = 'Marketing' WHERE `id` = 10 AND `name` = 'Sales' AND `location` IS NULL;",
+    "DELETE FROM `departments` WHERE `id` = 10 AND `name` = 'Sales' AND `location` IS NULL;",
   ]);
 });
 
@@ -138,6 +159,18 @@ test("skips current_schema setup for Oracle data grid saves", () => {
   assert.equal(
     dataGridSaveExecutionSchema("postgres", { schema: "public", tableName: "T", primaryKeys: [] }),
     "public",
+  );
+});
+
+test("normalizes Hive ACID update and delete errors", () => {
+  const error = normalizeDataGridSaveError(
+    "hive",
+    "Statement 1 failed: Agent RPC error (-1): Error while compiling statement: FAILED: SemanticException [Error 10294]: Attempt to do update or delete using transaction manager that does not support these operations.. Previous 0 statement(s) may have been committed.",
+  );
+
+  assert.equal(
+    error,
+    "Hive UPDATE/DELETE are not enabled for this table or server. Add rows with INSERT, or enable ACID transactional tables in Hive before editing/deleting existing rows.",
   );
 });
 

@@ -4,9 +4,11 @@ import {
   buildDataGridRollbackStatements,
   buildDataGridSaveStatements,
   dataGridSaveExecutionSchema,
+  normalizeDataGridSaveError,
   validateDataGridSave,
 } from "@/lib/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/gridRowStatus";
+import { supportsDataGridTransaction } from "@/lib/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
@@ -125,7 +127,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const saveError = ref("");
 
   const useTransaction = computed(
-    () => editable.value && (!!customSave?.value || (!!connectionId.value && !!database.value && !!tableMeta.value)),
+    () =>
+      editable.value &&
+      supportsDataGridTransaction(databaseType.value) &&
+      (!!customSave?.value || (!!connectionId.value && !!database.value && !!tableMeta.value)),
   );
 
   function enterTransaction() {
@@ -536,7 +541,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           rows: result.value.rows,
         });
       } catch (e: any) {
-        saveError.value = String(e.message || e);
+        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         isSaving.value = false;
         return;
       }
@@ -599,7 +604,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           dataGridSaveExecutionSchema(databaseType.value, tableMeta.value),
         );
       } catch (e: any) {
-        saveError.value = String(e.message || e);
+        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         isSaving.value = false;
         return;
       }
@@ -607,7 +612,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       try {
         apiResult = await api.executeBatch(connectionId.value, database.value, stmts);
       } catch (e: any) {
-        saveError.value = String(e.message || e);
+        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         isSaving.value = false;
         return;
       }
@@ -617,7 +622,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           await onExecuteSql.value(sqlStmt);
         }
       } catch (e: any) {
-        saveError.value = String(e.message || e);
+        saveError.value = normalizeDataGridSaveError(databaseType.value, e);
         isSaving.value = false;
         return;
       }
