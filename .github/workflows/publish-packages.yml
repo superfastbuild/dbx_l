@@ -1,8 +1,6 @@
 name: Publish Packages
 
 on:
-  release:
-    types: [published, released]
   workflow_dispatch:
     inputs:
       tag:
@@ -10,7 +8,7 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   APP_NAME: dbx
@@ -21,12 +19,11 @@ jobs:
   publish:
     name: Publish to Homebrew & Scoop
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease) }}
     steps:
       - name: Extract version from tag
         id: version
         run: |
-          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          TAG="${{ github.event.inputs.tag }}"
           TAG="$(echo "${TAG}" | xargs)"
           VERSION="${TAG#v}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -219,12 +216,11 @@ jobs:
   upload-r2:
     name: Upload to R2
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease) }}
     steps:
       - name: Extract version from tag
         id: version
         run: |
-          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          TAG="${{ github.event.inputs.tag }}"
           TAG="$(echo "${TAG}" | xargs)"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
@@ -255,3 +251,19 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+  promote-release:
+    name: Promote to Release
+    needs: [publish, upload-r2]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote prerelease to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          gh release edit "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --prerelease=false \
+            --latest
+          echo "::notice::Release ${TAG} promoted from prerelease to latest release"
