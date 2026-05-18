@@ -322,13 +322,13 @@ async function toggle() {
     } else if ((node.type === "table" || node.type === "view") && node.connectionId && node.database) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "group-columns" && node.connectionId && node.database && node.tableName) {
-      await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema);
+      await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-indexes" && node.connectionId && node.database && node.tableName) {
-      await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema);
+      await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-fkeys" && node.connectionId && node.database && node.tableName) {
-      await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema);
+      await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-triggers" && node.connectionId && node.database && node.tableName) {
-      await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema);
+      await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
     }
     emit("node-toggled", node, wasExpanded);
   } catch (e: any) {

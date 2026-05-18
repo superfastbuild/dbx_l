@@ -998,10 +998,12 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isExpanded = true;
   }
 
-  async function loadColumns(connectionId: string, database: string, table: string, schema?: string) {
-    const parentId = schema
-      ? `${connectionId}:${database}:${schema}:${table}:__columns`
-      : `${connectionId}:${database}:${table}:__columns`;
+  async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+    const parentId =
+      nodeId ??
+      (schema
+        ? `${connectionId}:${database}:${schema}:${table}:__columns`
+        : `${connectionId}:${database}:${table}:__columns`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
 
@@ -1031,10 +1033,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadIndexes(connectionId: string, database: string, table: string, schema?: string) {
-    const parentId = schema
-      ? `${connectionId}:${database}:${schema}:${table}:__indexes`
-      : `${connectionId}:${database}:${table}:__indexes`;
+  async function loadIndexes(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+    const parentId =
+      nodeId ??
+      (schema
+        ? `${connectionId}:${database}:${schema}:${table}:__indexes`
+        : `${connectionId}:${database}:${table}:__indexes`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
 
@@ -1063,10 +1067,18 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadForeignKeys(connectionId: string, database: string, table: string, schema?: string) {
-    const parentId = schema
-      ? `${connectionId}:${database}:${schema}:${table}:__fkeys`
-      : `${connectionId}:${database}:${table}:__fkeys`;
+  async function loadForeignKeys(
+    connectionId: string,
+    database: string,
+    table: string,
+    schema?: string,
+    nodeId?: string,
+  ) {
+    const parentId =
+      nodeId ??
+      (schema
+        ? `${connectionId}:${database}:${schema}:${table}:__fkeys`
+        : `${connectionId}:${database}:${table}:__fkeys`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
 
@@ -1095,10 +1107,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadTriggers(connectionId: string, database: string, table: string, schema?: string) {
-    const parentId = schema
-      ? `${connectionId}:${database}:${schema}:${table}:__triggers`
-      : `${connectionId}:${database}:${table}:__triggers`;
+  async function loadTriggers(connectionId: string, database: string, table: string, schema?: string, nodeId?: string) {
+    const parentId =
+      nodeId ??
+      (schema
+        ? `${connectionId}:${database}:${schema}:${table}:__triggers`
+        : `${connectionId}:${database}:${table}:__triggers`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
 
@@ -1161,13 +1175,13 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if ((node.type === "table" || node.type === "view") && node.connectionId && node.database) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "group-columns" && node.connectionId && node.database && node.tableName) {
-      await loadColumns(node.connectionId, node.database, node.tableName, node.schema);
+      await loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-indexes" && node.connectionId && node.database && node.tableName) {
-      await loadIndexes(node.connectionId, node.database, node.tableName, node.schema);
+      await loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-fkeys" && node.connectionId && node.database && node.tableName) {
-      await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema);
+      await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-triggers" && node.connectionId && node.database && node.tableName) {
-      await loadTriggers(node.connectionId, node.database, node.tableName, node.schema);
+      await loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (
       node.type === "group-tables" ||
       node.type === "group-views" ||

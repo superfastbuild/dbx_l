@@ -9,6 +9,7 @@ import {
 import type { TableInfo } from "../../apps/desktop/src/types/database.ts";
 
 const treeItemSource = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+const connectionStoreSource = readFileSync("apps/desktop/src/stores/connectionStore.ts", "utf8");
 
 function table(name: string, tableType: "TABLE" | "VIEW" = "TABLE"): TableInfo {
   return { name, table_type: tableType };
@@ -127,4 +128,26 @@ test("table expander loads groups by the actual tree node id", () => {
     treeItemSource,
     /loadTableGroups\(node\.connectionId,\s*node\.database,\s*node\.label,\s*node\.schema,\s*node\.id\)/,
   );
+});
+
+test("table metadata group expanders load by their actual tree node ids", () => {
+  for (const [type, loader] of [
+    ["group-columns", "loadColumns"],
+    ["group-indexes", "loadIndexes"],
+    ["group-fkeys", "loadForeignKeys"],
+    ["group-triggers", "loadTriggers"],
+  ]) {
+    assert.match(
+      treeItemSource,
+      new RegExp(
+        `node\\.type === "${type}"[\\s\\S]*connectionStore\\.${loader}\\(node\\.connectionId,\\s*node\\.database,\\s*node\\.tableName,\\s*node\\.schema,\\s*node\\.id\\)`,
+      ),
+    );
+    assert.match(
+      connectionStoreSource,
+      new RegExp(
+        `node\\.type === "${type}"[\\s\\S]*await ${loader}\\(node\\.connectionId,\\s*node\\.database,\\s*node\\.tableName,\\s*node\\.schema,\\s*node\\.id\\)`,
+      ),
+    );
+  }
 });
