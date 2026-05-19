@@ -33,6 +33,21 @@ test("assigns unique aliases for duplicate result column names", () => {
   });
 });
 
+test("strips top-level SQL Server order by before wrapping result sort query", () => {
+  const result = buildSortedQuerySql(
+    "SELECT id, name FROM users ORDER BY id DESC",
+    "sqlserver",
+    ["id", "name"],
+    1,
+    "name",
+    "asc",
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    sql: "SELECT * FROM (SELECT id, name FROM users) t([id], [name]) ORDER BY [name] ASC;",
+  });
+});
+
 test("rejects multiple statements for result sorting", () => {
   const result = buildSortedQuerySql("SELECT 1; SELECT 2;", "postgres", ["id"], 0, "id", "asc");
   assert.deepEqual(result, { ok: false, reason: "multi" });

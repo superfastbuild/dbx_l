@@ -1,6 +1,7 @@
 import type { DatabaseType } from "../types/database.ts";
 import { quoteTableIdentifier } from "./tableSelectSql.ts";
 import { findStatementAtCursor } from "./sqlStatementSplit.ts";
+import { sqlServerStatementForDerivedTable } from "./sqlServerQueryWrapping.ts";
 
 export type QuerySortDirection = "asc" | "desc";
 
@@ -44,9 +45,10 @@ export function buildSortedQuerySql(
   const sortAlias = aliases[columnIndex] ?? aliases[resultColumns.indexOf(column)] ?? fallbackAlias(columnIndex);
   const quotedColumn = quoteTableIdentifier(databaseType, sortAlias);
   const aliasList = aliases.map((alias) => quoteTableIdentifier(databaseType, alias)).join(", ");
+  const wrappedStatement = databaseType === "sqlserver" ? sqlServerStatementForDerivedTable(statement) : statement;
   return {
     ok: true,
-    sql: `SELECT * FROM (${statement}) t(${aliasList}) ORDER BY ${quotedColumn} ${direction.toUpperCase()};`,
+    sql: `SELECT * FROM (${wrappedStatement}) t(${aliasList}) ORDER BY ${quotedColumn} ${direction.toUpperCase()};`,
   };
 }
 

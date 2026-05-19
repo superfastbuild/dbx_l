@@ -33,6 +33,15 @@ test("uses SQL Server TOP pagination for the first page to support SQL Server 20
   });
 });
 
+test("strips top-level SQL Server order by before wrapping paginated query", () => {
+  const result = buildPaginatedQuerySql("SELECT id FROM users ORDER BY id DESC", "sqlserver", 100, 0);
+
+  assert.deepEqual(result, {
+    ok: true,
+    sql: "SELECT TOP (100) * FROM (SELECT id FROM users) [dbx_page]",
+  });
+});
+
 test("does not generate SQL Server OFFSET pagination for later query-result pages", () => {
   const result = buildPaginatedQuerySql("SELECT id FROM users", "sqlserver", 100, 300);
 
@@ -89,6 +98,27 @@ test("wraps a single select query for total row count", () => {
   assert.deepEqual(result, {
     ok: true,
     sql: 'SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id, name FROM users) "dbx_count";',
+  });
+});
+
+test("strips top-level SQL Server order by before wrapping count query", () => {
+  const result = buildCountQuerySql("SELECT id FROM users ORDER BY id DESC", "sqlserver");
+
+  assert.deepEqual(result, {
+    ok: true,
+    sql: "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT id FROM users) [dbx_count];",
+  });
+});
+
+test("keeps nested SQL Server order by expressions when wrapping count query", () => {
+  const result = buildCountQuerySql(
+    "SELECT ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn, id FROM users ORDER BY id DESC",
+    "sqlserver",
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    sql: "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn, id FROM users) [dbx_count];",
   });
 });
 

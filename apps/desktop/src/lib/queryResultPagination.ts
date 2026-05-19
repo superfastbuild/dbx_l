@@ -2,6 +2,7 @@ import type { DatabaseType } from "../types/database.ts";
 import { usesFetchFirst } from "./databaseCapabilities.ts";
 import { quoteTableIdentifier } from "./tableSelectSql.ts";
 import { findStatementAtCursor } from "./sqlStatementSplit.ts";
+import { sqlServerStatementForDerivedTable } from "./sqlServerQueryWrapping.ts";
 
 export interface PaginatedQuerySqlResult {
   ok: true;
@@ -84,13 +85,14 @@ export function buildPaginatedQuerySql(
   const safeLimit = Math.max(1, Math.floor(limit));
   const safeOffset = Math.max(0, Math.floor(offset));
   const alias = quoteTableIdentifier(databaseType, "dbx_page");
-  const base = `SELECT * FROM (${statement.sql}) ${alias}`;
+  const wrappedSql = databaseType === "sqlserver" ? sqlServerStatementForDerivedTable(statement.sql) : statement.sql;
+  const base = `SELECT * FROM (${wrappedSql}) ${alias}`;
 
   if (databaseType === "sqlserver") {
     if (safeOffset > 0) return { ok: false, reason: "unsupported" };
     return {
       ok: true,
-      sql: `SELECT TOP (${safeLimit}) * FROM (${statement.sql}) ${alias}`,
+      sql: `SELECT TOP (${safeLimit}) * FROM (${wrappedSql}) ${alias}`,
     };
   }
 
@@ -112,7 +114,8 @@ export function buildCountQuerySql(
   if (unsupportedPaginationTypes.has(databaseType)) return { ok: false, reason: "unsupported" };
 
   const alias = quoteTableIdentifier(databaseType, "dbx_count");
-  return { ok: true, sql: `SELECT COUNT(*) AS dbx_total_rows FROM (${statement.sql}) ${alias};` };
+  const wrappedSql = databaseType === "sqlserver" ? sqlServerStatementForDerivedTable(statement.sql) : statement.sql;
+  return { ok: true, sql: `SELECT COUNT(*) AS dbx_total_rows FROM (${wrappedSql}) ${alias};` };
 }
 
 function singleSelectableStatement(
