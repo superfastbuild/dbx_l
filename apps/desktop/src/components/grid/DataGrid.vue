@@ -2155,7 +2155,9 @@ const {
   copyCell,
   copyRow,
   copyRowAsInsert,
+  copyRowAsInsertWithoutPrimaryKeys,
   copyRowAsUpdate,
+  canCopyRowAsInsertWithoutPrimaryKeys,
   canCopyRowAsUpdate,
   copyAll,
   copySelectionTsv,
@@ -2179,8 +2181,6 @@ const {
   selectedRange,
   contextCell: exportContextCell,
   getRowItem: (rowId: number) => visibleDisplayItems.value.find((item) => item.id === rowId),
-  quoteIdent,
-  escapeVal,
   selectedRowIds,
   hasRowSelection,
 });
@@ -4472,6 +4472,13 @@ defineExpose({
             </ContextMenuItem>
             <ContextMenuItem @click="copyRowAsInsert">
               {{ isMultiRow ? t("grid.copyRowsInsert", { count: multiRowCount }) : t("grid.copyRowInsert") }}
+            </ContextMenuItem>
+            <ContextMenuItem v-if="canCopyRowAsInsertWithoutPrimaryKeys" @click="copyRowAsInsertWithoutPrimaryKeys">
+              {{
+                isMultiRow
+                  ? t("grid.copyRowsInsertWithoutPrimaryKeys", { count: multiRowCount })
+                  : t("grid.copyRowInsertWithoutPrimaryKeys")
+              }}
             </ContextMenuItem>
             <ContextMenuItem v-if="canCopyRowAsUpdate" @click="copyRowAsUpdate">
               {{ isMultiRow ? t("grid.copyRowsUpdate", { count: multiRowCount }) : t("grid.copyRowUpdate") }}

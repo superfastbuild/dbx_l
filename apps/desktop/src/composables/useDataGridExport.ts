@@ -14,7 +14,7 @@ import { useToast } from "@/composables/useToast";
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/actionActivation";
 import { copyToClipboard } from "@/lib/clipboard";
-import { buildDataGridCopyUpdateStatements } from "@/lib/dataGridSql";
+import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements } from "@/lib/dataGridSql";
 import type { DatabaseType } from "@/types/database";
 
 interface RowItem {
@@ -42,8 +42,6 @@ export interface UseDataGridExportOptions {
     | Ref<{ rowId: number; rowIndex: number; col: number } | null>
     | ComputedRef<{ rowId: number; rowIndex: number; col: number } | null>;
   getRowItem: (rowId: number) => RowItem | undefined;
-  quoteIdent: (name: string) => string;
-  escapeVal: (value: CellValue) => string;
   selectedRowIds: Ref<Set<number>> | ComputedRef<Set<number>>;
   hasRowSelection: ComputedRef<boolean>;
 }
@@ -65,8 +63,6 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     selectedRange,
     contextCell,
     getRowItem,
-    quoteIdent,
-    escapeVal,
     selectedRowIds,
     hasRowSelection,
   } = options;
@@ -168,32 +164,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await copyText(JSON.stringify(obj, null, 2));
   }
 
+  function insertEligibleRows(): RowItem[] {
+    return targetedRows();
+  }
+
+  async function copyRowAsInsertStatement(excludePrimaryKeys: boolean) {
+    const statement = buildDataGridCopyInsertStatement({
+      databaseType: databaseType.value,
+      tableMeta: tableMeta.value,
+      columns: columns.value,
+      sourceColumns: sourceColumns.value,
+      rows: insertEligibleRows().map((item) => item.data),
+      excludePrimaryKeys,
+    });
+    if (!statement) return;
+    await copyText(statement);
+  }
+
   async function copyRowAsInsert() {
-    const table = tableMeta.value
-      ? (tableMeta.value.schema ? `${quoteIdent(tableMeta.value.schema)}.` : "") + quoteIdent(tableMeta.value.tableName)
-      : "table_name";
-    const cols = columns.value.map((c) => quoteIdent(c)).join(", ");
+    await copyRowAsInsertStatement(false);
+  }
 
-    if (hasRowSelection.value && selectedRowIds.value.size > 0) {
-      const items = displayItems.value.filter((item) => selectedRowIds.value.has(item.id));
-      const valueRows = items.map((item) => `(${item.data.map((v) => escapeVal(v)).join(", ")})`);
-      await copyText(`INSERT INTO ${table} (${cols}) VALUES\n${valueRows.join(",\n")};`);
-      return;
-    }
-
-    const range = selectedRange.value;
-    if (range && range.startRow !== range.endRow) {
-      const items = displayItems.value.slice(range.startRow, range.endRow + 1);
-      const valueRows = items.map((item) => `(${item.data.map((v) => escapeVal(v)).join(", ")})`);
-      await copyText(`INSERT INTO ${table} (${cols}) VALUES\n${valueRows.join(",\n")};`);
-      return;
-    }
-
-    if (!contextCell.value) return;
-    const item = getRowItem(contextCell.value.rowId);
-    if (!item) return;
-    const vals = item.data.map((v) => escapeVal(v)).join(", ");
-    await copyText(`INSERT INTO ${table} (${cols}) VALUES (${vals});`);
+  async function copyRowAsInsertWithoutPrimaryKeys() {
+    await copyRowAsInsertStatement(true);
   }
 
   async function copyRowAsUpdate() {
@@ -222,6 +215,20 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         rows: [rows[0].data],
       }).length > 0
     );
+  });
+
+  const canCopyRowAsInsertWithoutPrimaryKeys = computed(() => {
+    if (!tableMeta.value?.primaryKeys.length) return false;
+    const rows = insertEligibleRows();
+    if (!rows.length) return false;
+    return !!buildDataGridCopyInsertStatement({
+      databaseType: databaseType.value,
+      tableMeta: tableMeta.value,
+      columns: columns.value,
+      sourceColumns: sourceColumns.value,
+      rows: [rows[0].data],
+      excludePrimaryKeys: true,
+    });
   });
 
   async function copyAll() {
@@ -370,7 +377,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyCell,
     copyRow,
     copyRowAsInsert,
+    copyRowAsInsertWithoutPrimaryKeys,
     copyRowAsUpdate,
+    canCopyRowAsInsertWithoutPrimaryKeys,
     canCopyRowAsUpdate,
     copyAll,
     copySelectionTsv,

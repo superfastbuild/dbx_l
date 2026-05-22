@@ -45,6 +45,15 @@ export interface DataGridCopyUpdateStatementOptions {
   rows: GridCellValue[][];
 }
 
+export interface DataGridCopyInsertStatementOptions {
+  databaseType?: DatabaseType;
+  tableMeta?: DataGridTableMeta;
+  columns: string[];
+  sourceColumns?: Array<string | undefined>;
+  rows: GridCellValue[][];
+  excludePrimaryKeys?: boolean;
+}
+
 export interface DataGridSaveValidationOptions {
   databaseType?: DatabaseType;
   tableMeta?: DataGridTableMeta;
@@ -247,6 +256,43 @@ export function buildDataGridCopyUpdateStatements(options: DataGridCopyUpdateSta
   }
 
   return statements;
+}
+
+export function buildDataGridCopyInsertStatement(options: DataGridCopyInsertStatementOptions): string | undefined {
+  const saveColumns = effectiveColumns(options.sourceColumns, options.columns);
+  const columnInfo = columnInfoByName(options.tableMeta?.columns);
+  const primaryKeySet = new Set(
+    (options.tableMeta?.primaryKeys ?? []).map((primaryKey) => normalizeColumnName(primaryKey)),
+  );
+  const insertableColumns = saveColumns
+    .map((column, index) => ({ column, index }))
+    .filter((entry): entry is { column: string; index: number } => !!entry.column)
+    .filter((entry) => !isOracleRowId(options.databaseType, entry.column));
+  const insertColumns = insertableColumns.filter(
+    (entry) => !options.excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(entry.column)),
+  );
+
+  if (options.excludePrimaryKeys && insertColumns.length === insertableColumns.length) return undefined;
+  if (insertColumns.length === 0 || options.rows.length === 0) return undefined;
+
+  const table = options.tableMeta
+    ? qualifiedTableName({
+        databaseType: options.databaseType,
+        schema: options.tableMeta.schema,
+        tableName: options.tableMeta.tableName,
+      })
+    : "table_name";
+  const columns = insertColumns.map((entry) => quoteIdent(options.databaseType, entry.column)).join(", ");
+  const valueRows = options.rows.map(
+    (row) =>
+      `(${insertColumns
+        .map(({ column, index }) =>
+          formatGridSqlLiteral(row[index], options.databaseType, columnInfo.get(normalizeColumnName(column))),
+        )
+        .join(", ")})`,
+  );
+
+  return `INSERT INTO ${table} (${columns}) VALUES${valueRows.length === 1 ? " " : "\n"}${valueRows.join(",\n")};`;
 }
 
 function buildTdengineDataGridSaveStatements(options: DataGridSaveStatementOptions): string[] {

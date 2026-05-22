@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
+  buildDataGridCopyInsertStatement,
   buildDataGridCopyUpdateStatements,
   buildDataGridRollbackStatements,
   buildDataGridSaveStatements,
@@ -54,6 +55,58 @@ test("builds copy-as-update statements using primary keys and non-primary-key co
   });
 
   assert.deepEqual(statements, [`UPDATE "public"."users" SET "name" = 'Ada', "status" = 'active' WHERE "id" = 1;`]);
+});
+
+test("builds copy-as-insert statement excluding primary key columns", () => {
+  const statement = buildDataGridCopyInsertStatement({
+    databaseType: "mysql",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+    },
+    columns: ["id", "login_name", "display_name"],
+    rows: [
+      [1, "ada", "Ada"],
+      [2, "linus", "Linus"],
+    ],
+    excludePrimaryKeys: true,
+  });
+
+  assert.equal(
+    statement,
+    "INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');",
+  );
+});
+
+test("copy-as-insert excludes primary keys using source column names", () => {
+  const statement = buildDataGridCopyInsertStatement({
+    databaseType: "mysql",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["user_id"],
+    },
+    columns: ["id", "name"],
+    sourceColumns: ["user_id", "name"],
+    rows: [[7, "Ada"]],
+    excludePrimaryKeys: true,
+  });
+
+  assert.equal(statement, "INSERT INTO `users` (`name`) VALUES ('Ada');");
+});
+
+test("copy-as-insert without primary keys is unavailable when no primary key columns are visible", () => {
+  const statement = buildDataGridCopyInsertStatement({
+    databaseType: "postgres",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+    },
+    columns: ["name"],
+    rows: [["Ada"]],
+    excludePrimaryKeys: true,
+  });
+
+  assert.equal(statement, undefined);
 });
 
 test("skips copy-as-update statements when primary keys are unavailable", () => {
