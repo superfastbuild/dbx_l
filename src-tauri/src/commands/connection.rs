@@ -244,10 +244,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 Err(e) => Err(e),
             },
             DatabaseType::Sqlite => match db::sqlite::connect_path(&expand_tilde(&config.host)).await {
-                Ok(pool) => {
-                    pool.close().await;
-                    Ok("Connection successful".to_string())
-                }
+                Ok(_) => Ok("Connection successful".to_string()),
                 Err(e) => Err(e),
             },
             DatabaseType::Redis => db::redis_driver::connect(&url).await.map(|_| "Connection successful".to_string()),
@@ -439,7 +436,7 @@ pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: Strin
                     let _ = p.disconnect().await;
                 }
                 PoolKind::Postgres(p) => p.close().await,
-                PoolKind::Sqlite(p) => p.close().await,
+                PoolKind::Sqlite(_) => {}
                 PoolKind::Redis(_) => {}
                 PoolKind::DuckDb(_) => {}
                 PoolKind::MongoDb(_) => {}

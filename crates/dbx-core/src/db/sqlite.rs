@@ -1,36 +1,82 @@
-use futures::StreamExt;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
-use sqlx::{Column, Executor, Row};
-use std::str::FromStr;
-use std::time::{Duration, Instant};
+use base64::prelude::{Engine as _, BASE64_STANDARD};
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OpenFlags};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo};
 
-pub async fn connect_path(path: &str) -> Result<SqlitePool, String> {
+#[derive(Clone)]
+pub struct SqliteHandle {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl SqliteHandle {
+    pub fn with_connection<T, F>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&mut Connection) -> Result<T, String>,
+    {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        f(&mut conn)
+    }
+}
+
+pub async fn connect_path(path: &str) -> Result<SqliteHandle, String> {
+    connect_path_with_options(path, false).await
+}
+
+pub async fn connect_path_create_if_missing(path: &str) -> Result<SqliteHandle, String> {
+    connect_path_with_options(path, true).await
+}
+
+async fn connect_path_with_options(path: &str, create_if_missing: bool) -> Result<SqliteHandle, String> {
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || open_sqlite_handle(&path, create_if_missing))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn open_sqlite_handle(path: &str, create_if_missing: bool) -> Result<SqliteHandle, String> {
     let is_memory = is_memory_database_path(path);
-    if !is_memory {
+    if !is_memory && !create_if_missing {
         validate_file_path(path, is_network_path)?;
     }
 
-    let mut options = if is_memory {
-        SqliteConnectOptions::from_str("sqlite::memory:").map_err(|e| format!("SQLite connection failed: {e}"))?
-    } else {
-        SqliteConnectOptions::new().filename(path).create_if_missing(false)
-    };
-
-    if is_network_path(path) {
-        options = options.vfs("unix-nolock");
+    if !is_memory && create_if_missing {
+        ensure_parent_dir(path)?;
     }
 
-    SqlitePoolOptions::new()
-        .max_connections(if is_memory { 1 } else { 5 })
-        .acquire_timeout(Duration::from_secs(10))
-        .idle_timeout(Duration::from_secs(300))
-        .connect_with(options)
-        .await
-        .map_err(|e| format!("SQLite connection failed: {e}"))
+    let conn = if is_memory {
+        Connection::open_in_memory().map_err(|e| format!("SQLite connection failed: {e}"))?
+    } else {
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
+        if create_if_missing {
+            flags |= OpenFlags::SQLITE_OPEN_CREATE;
+        }
+        if is_network_path(path) {
+            flags |= OpenFlags::SQLITE_OPEN_URI;
+            Connection::open_with_flags(format!("file:{}?vfs=unix-nolock", path), flags)
+                .map_err(|e| format!("SQLite connection failed: {e}"))?
+        } else {
+            Connection::open_with_flags(path, flags).map_err(|e| format!("SQLite connection failed: {e}"))?
+        }
+    };
+
+    conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?;
+
+    Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) })
+}
+
+fn ensure_parent_dir(path: &str) -> Result<(), String> {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn is_network_path(path: &str) -> bool {
@@ -107,8 +153,6 @@ mod tests {
     async fn view_with_if_function_works_after_normalization() {
         let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
 
-        // Create a view that uses if() — this succeeds because CREATE VIEW
-        // just stores the SQL text without evaluating it
         execute_query(&pool, "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);")
             .await
             .expect("create and populate table");
@@ -117,7 +161,6 @@ mod tests {
             .await
             .expect("create view");
 
-        // Query the view — this must go through normalize_sqlite_sql
         let result = execute_query(&pool, "SELECT * FROM v ORDER BY x").await.expect("query view");
 
         assert_eq!(result.rows.len(), 3);
@@ -129,7 +172,6 @@ mod tests {
     async fn if_rewrite_works_in_direct_query() {
         let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
 
-        // if() is not a built-in SQLite function — the normalizer must rewrite it to IIF()
         let result = execute_query(&pool, "SELECT if(1 = 1, 'yes', 'no') AS answer")
             .await
             .expect("if() should be rewritten to IIF()");
@@ -165,138 +207,176 @@ mod tests {
     }
 }
 
-pub async fn list_databases(_pool: &SqlitePool) -> Result<Vec<DatabaseInfo>, String> {
+pub async fn list_databases(_pool: &SqliteHandle) -> Result<Vec<DatabaseInfo>, String> {
     Ok(vec![DatabaseInfo { name: "main".to_string() }])
 }
 
-pub async fn list_tables(pool: &SqlitePool, _schema: &str) -> Result<Vec<TableInfo>, String> {
-    let rows: Vec<SqliteRow> = sqlx::query(
-        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    )
-    .fetch_all(pool)
+pub async fn list_tables(pool: &SqliteHandle, _schema: &str) -> Result<Vec<TableInfo>, String> {
+    let pool = pool.clone();
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name, type FROM sqlite_master \
+                     WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let table_type: String = row.get(1)?;
+                    Ok(TableInfo {
+                        name: row.get(0)?,
+                        table_type: if table_type == "view" { "VIEW".to_string() } else { "BASE TABLE".to_string() },
+                        comment: None,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        })
+    })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+}
 
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let t: String = row.get("type");
-            TableInfo {
-                name: row.get::<String, _>("name"),
-                table_type: if t == "view" { "VIEW".to_string() } else { "BASE TABLE".to_string() },
-                comment: None,
+pub async fn get_columns(pool: &SqliteHandle, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let pool = pool.clone();
+    let table = table.to_string();
+    tokio::task::spawn_blocking(move || {
+        let sql = format!("PRAGMA table_info(\"{}\")", table.replace('"', "\"\""));
+        pool.with_connection(|conn| {
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ColumnInfo {
+                        name: row.get("name")?,
+                        data_type: row.get("type")?,
+                        is_nullable: row.get::<_, i32>("notnull")? == 0,
+                        column_default: row.get("dflt_value")?,
+                        is_primary_key: row.get::<_, i32>("pk")? > 0,
+                        extra: None,
+                        comment: None,
+                        numeric_precision: None,
+                        numeric_scale: None,
+                        character_maximum_length: None,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn list_indexes(pool: &SqliteHandle, _schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let pool = pool.clone();
+    let table = table.to_string();
+    tokio::task::spawn_blocking(move || {
+        let safe_table = table.replace('"', "\"\"");
+        pool.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!("PRAGMA index_list(\"{safe_table}\")")).map_err(|e| e.to_string())?;
+            let idx_rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>("name")?,
+                        row.get::<_, i32>("unique")? != 0,
+                        row.get::<_, String>("origin")?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            let mut indexes = Vec::new();
+            for (name, is_unique, origin) in idx_rows {
+                let safe_name = name.replace('"', "\"\"");
+                let mut col_stmt =
+                    conn.prepare(&format!("PRAGMA index_info(\"{safe_name}\")")).map_err(|e| e.to_string())?;
+                let columns = col_stmt
+                    .query_map([], |row| row.get::<_, String>("name"))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+
+                indexes.push(IndexInfo {
+                    name,
+                    columns,
+                    is_unique,
+                    is_primary: origin == "pk",
+                    filter: None,
+                    index_type: None,
+                    included_columns: None,
+                    comment: None,
+                });
             }
+            Ok(indexes)
         })
-        .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-pub async fn get_columns(pool: &SqlitePool, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let rows: Vec<SqliteRow> =
-        sqlx::query(&format!("PRAGMA table_info(\"{}\")", table)).fetch_all(pool).await.map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .iter()
-        .map(|row| ColumnInfo {
-            name: row.get::<String, _>("name"),
-            data_type: row.get::<String, _>("type"),
-            is_nullable: row.get::<i32, _>("notnull") == 0,
-            column_default: row.get::<Option<String>, _>("dflt_value"),
-            is_primary_key: row.get::<i32, _>("pk") > 0,
-            extra: None,
-            comment: None,
-            numeric_precision: None,
-            numeric_scale: None,
-            character_maximum_length: None,
+pub async fn list_foreign_keys(pool: &SqliteHandle, _schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
+    let pool = pool.clone();
+    let table = table.to_string();
+    tokio::task::spawn_blocking(move || {
+        let sql = format!("PRAGMA foreign_key_list(\"{}\")", table.replace('"', "\"\""));
+        pool.with_connection(|conn| {
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ForeignKeyInfo {
+                        name: format!("fk_{}", row.get::<_, i32>("id")?),
+                        column: row.get("from")?,
+                        ref_table: row.get("table")?,
+                        ref_column: row.get("to")?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
         })
-        .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-pub async fn list_indexes(pool: &SqlitePool, _schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    let safe_table = table.replace('"', "\"\"");
-    let idx_rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA index_list(\"{safe_table}\")"))
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut indexes = Vec::new();
-    for idx_row in &idx_rows {
-        let name: String = idx_row.get("name");
-        let is_unique: bool = idx_row.get::<i32, _>("unique") != 0;
-        let origin: String = idx_row.get::<String, _>("origin");
-        let is_primary = origin == "pk";
-
-        let safe_name = name.replace('"', "\"\"");
-        let col_rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA index_info(\"{safe_name}\")"))
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let columns: Vec<String> = col_rows.iter().map(|r| r.get::<String, _>("name")).collect();
-
-        indexes.push(IndexInfo {
-            name,
-            columns,
-            is_unique,
-            is_primary,
-            filter: None,
-            index_type: None,
-            included_columns: None,
-            comment: None,
-        });
-    }
-    Ok(indexes)
-}
-
-pub async fn list_foreign_keys(pool: &SqlitePool, _schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
-    let rows: Vec<SqliteRow> = sqlx::query(&format!("PRAGMA foreign_key_list(\"{}\")", table))
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .iter()
-        .map(|row| ForeignKeyInfo {
-            name: format!("fk_{}", row.get::<i32, _>("id")),
-            column: row.get::<String, _>("from"),
-            ref_table: row.get::<String, _>("table"),
-            ref_column: row.get::<String, _>("to"),
+pub async fn list_triggers(pool: &SqliteHandle, _schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
+    let pool = pool.clone();
+    let table = table.to_string();
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? ORDER BY name")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([table], |row| {
+                    let sql_text: Option<String> = row.get("sql")?;
+                    let upper = sql_text.unwrap_or_default().to_uppercase();
+                    let timing = if upper.contains("BEFORE") {
+                        "BEFORE"
+                    } else if upper.contains("AFTER") {
+                        "AFTER"
+                    } else {
+                        "INSTEAD OF"
+                    };
+                    let event = if upper.contains("INSERT") {
+                        "INSERT"
+                    } else if upper.contains("UPDATE") {
+                        "UPDATE"
+                    } else {
+                        "DELETE"
+                    };
+                    Ok(TriggerInfo { name: row.get("name")?, event: event.to_string(), timing: timing.to_string() })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
         })
-        .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-pub async fn list_triggers(pool: &SqlitePool, _schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
-    let rows: Vec<SqliteRow> =
-        sqlx::query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? ORDER BY name")
-            .bind(table)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let sql_text: String = row.get::<Option<String>, _>("sql").unwrap_or_default();
-            let upper = sql_text.to_uppercase();
-            let timing = if upper.contains("BEFORE") {
-                "BEFORE"
-            } else if upper.contains("AFTER") {
-                "AFTER"
-            } else {
-                "INSTEAD OF"
-            };
-            let event = if upper.contains("INSERT") {
-                "INSERT"
-            } else if upper.contains("UPDATE") {
-                "UPDATE"
-            } else {
-                "DELETE"
-            };
-            TriggerInfo { name: row.get::<String, _>("name"), event: event.to_string(), timing: timing.to_string() }
-        })
-        .collect())
-}
-
-pub async fn execute_query(pool: &SqlitePool, sql: &str) -> Result<QueryResult, String> {
+pub async fn execute_query(pool: &SqliteHandle, sql: &str) -> Result<QueryResult, String> {
     execute_query_with_max_rows(pool, sql, None).await
 }
 
@@ -304,13 +384,8 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
-/// Function-name rewrites for SQLite compatibility.
-/// Keys are lowercase source names; values are replacement names.
-/// Applied only at word boundaries followed by optional whitespace and `(`.
 const SQLITE_FUNCTION_ALIASES: &[(&str, &str)] = &[("if", "IIF"), ("substring", "substr")];
 
-/// Rewrites known non-SQLite function names (e.g. `if()` → `IIF()`, `substring()` → `substr()`)
-/// before sending SQL to SQLite. Avoids modifying string literals, comments, and identifiers.
 fn normalize_sqlite_sql(sql: &str) -> String {
     let mut result = String::with_capacity(sql.len());
     let chars: Vec<char> = sql.chars().collect();
@@ -397,71 +472,76 @@ fn normalize_sqlite_sql(sql: &str) -> String {
 }
 
 pub async fn execute_query_with_max_rows(
-    pool: &SqlitePool,
+    pool: &SqliteHandle,
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<QueryResult, String> {
+    let pool = pool.clone();
+    let sql = normalize_sqlite_sql(sql);
+    tokio::task::spawn_blocking(move || execute_query_blocking(&pool, &sql, max_rows))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
-    let sql = normalize_sqlite_sql(sql);
 
-    if starts_with_executable_sql_keyword(&sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
-        let desc = pool.describe(&sql).await.map_err(|e| e.to_string())?;
-        let columns: Vec<String> = desc.columns().iter().map(|c| c.name().to_string()).collect();
+    pool.with_connection(|conn| {
+        if starts_with_executable_sql_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
+            let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+            let columns = stmt.column_names().iter().map(|name| name.to_string()).collect::<Vec<_>>();
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut result_rows = Vec::new();
 
-        let mut stream = sqlx::query(&sql).fetch(pool);
-        let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
-
-        while let Some(row) = stream.next().await {
-            let row = row.map_err(|e| e.to_string())?;
-            result_rows.push(
-                (0..row.len())
-                    .map(|i| {
-                        row.try_get::<String, _>(i)
-                            .map(serde_json::Value::String)
-                            .or_else(|_| row.try_get::<i64, _>(i).map(super::safe_i64_to_json))
-                            .or_else(|_| {
-                                row.try_get::<f64, _>(i).map(|v| {
-                                    serde_json::Number::from_f64(v)
-                                        .map(serde_json::Value::Number)
-                                        .unwrap_or(serde_json::Value::Null)
-                                })
-                            })
-                            .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
-                            .unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect(),
-            );
-            if result_rows.len() > row_limit {
-                break;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let mut values = Vec::with_capacity(columns.len());
+                for i in 0..columns.len() {
+                    values.push(value_ref_to_json(row.get_ref(i).map_err(|e| e.to_string())?));
+                }
+                result_rows.push(values);
+                if result_rows.len() > row_limit {
+                    break;
+                }
             }
+
+            let truncated = result_rows.len() > row_limit;
+            if truncated {
+                result_rows.truncate(row_limit);
+            }
+
+            Ok(QueryResult {
+                columns,
+                rows: result_rows,
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated,
+                session_id: None,
+                has_more: false,
+            })
+        } else {
+            conn.execute_batch(sql).map_err(|e| e.to_string())?;
+            Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                affected_rows: conn.changes(),
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
         }
+    })
+}
 
-        let truncated = result_rows.len() > row_limit;
-        if truncated {
-            result_rows.truncate(row_limit);
+fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(v) => super::safe_i64_to_json(v),
+        ValueRef::Real(v) => {
+            serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
         }
-
-        Ok(QueryResult {
-            columns,
-            rows: result_rows,
-            affected_rows: 0,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated,
-            session_id: None,
-            has_more: false,
-        })
-    } else {
-        let result = sqlx::query(&sql).execute(pool).await.map_err(|e| e.to_string())?;
-
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            affected_rows: result.rows_affected(),
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-        })
+        ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).to_string()),
+        ValueRef::Blob(v) => serde_json::Value::String(BASE64_STANDARD.encode(v)),
     }
 }

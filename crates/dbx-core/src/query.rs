@@ -866,13 +866,12 @@ pub async fn execute_statements(
 }
 
 /// Execute multiple SQL statements within a single transaction.
-/// For sqlx-based pools (Postgres/MySQL/SQLite), uses the Transaction API to
-/// guarantee all statements run on the same physical connection.
-/// For custom drivers (ClickHouse/SqlServer/Agent), uses explicit
-/// BEGIN/COMMIT/ROLLBACK on the already-single-connection client.
+/// For pooled drivers (Postgres/MySQL), uses the driver transaction API.
+/// For SQLite and already-single-connection drivers (ClickHouse/SqlServer/Agent),
+/// uses explicit BEGIN/COMMIT/ROLLBACK on the shared connection.
 /// For databases that don't support explicit transactions (Redis, MongoDB, Oracle),
 /// executes statements sequentially without transaction.
-/// If BEGIN fails, returns an error — no silent fallback to auto-commit.
+/// If BEGIN fails, returns an error instead of silently falling back to auto-commit.
 pub async fn execute_statements_in_transaction(
     state: &AppState,
     connection_id: &str,
@@ -919,7 +918,7 @@ pub async fn execute_statements_in_transaction(
 enum TxPath {
     Pg(sqlx::postgres::PgPool),
     Mysql(mysql_async::Pool, bool),
-    Sqlite(sqlx::sqlite::SqlitePool),
+    Sqlite(db::sqlite::SqliteHandle),
     Explicit,
     None,
 }
@@ -993,32 +992,38 @@ async fn exec_tx_mysql_inner(
 }
 
 async fn exec_tx_sqlite_inner(
-    pool: sqlx::sqlite::SqlitePool,
+    pool: db::sqlite::SqliteHandle,
     statements: &[String],
     start: std::time::Instant,
 ) -> Result<db::QueryResult, String> {
-    let mut conn = pool.acquire().await.map_err(|e| format!("Failed to acquire connection: {}", e))?;
-    sqlx::query("BEGIN").execute(&mut *conn).await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
-    let mut total_affected: u64 = 0;
-    for (i, sql) in statements.iter().enumerate() {
-        match sqlx::query(sql).execute(&mut *conn).await {
-            Ok(r) => total_affected += r.rows_affected(),
-            Err(e) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                return Err(format!("Statement {} failed: {}", i + 1, e));
+    let statements = statements.to_vec();
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
+            let mut total_affected: u64 = 0;
+            for (i, sql) in statements.iter().enumerate() {
+                match conn.execute_batch(sql) {
+                    Ok(_) => total_affected += conn.changes(),
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(format!("Statement {} failed: {}", i + 1, e));
+                    }
+                }
             }
-        }
-    }
-    sqlx::query("COMMIT").execute(&mut *conn).await.map_err(|e| format!("COMMIT failed: {}", e))?;
-    Ok(db::QueryResult {
-        columns: vec![],
-        rows: vec![],
-        affected_rows: total_affected,
-        execution_time_ms: start.elapsed().as_millis(),
-        truncated: false,
-        session_id: None,
-        has_more: false,
+            conn.execute_batch("COMMIT").map_err(|e| format!("COMMIT failed: {}", e))?;
+            Ok(db::QueryResult {
+                columns: vec![],
+                rows: vec![],
+                affected_rows: total_affected,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            })
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 async fn exec_tx_explicit_inner(

@@ -1,16 +1,17 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::str::FromStr;
 
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::ai::{AiChatMessage, AiConfig, AiConversation};
-use crate::history::HistoryEntry;
+use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
+use crate::history::{HistoryEntry, MAX_HISTORY};
 use crate::models::connection::ConnectionConfig;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 pub struct Storage {
-    db: SqlitePool,
+    db: SqliteHandle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,27 +99,36 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     )",
 ];
 
-// ---------------------------------------------------------------------------
-// Construction / schema
-// ---------------------------------------------------------------------------
-
 impl Storage {
     pub async fn open(db_path: &Path) -> Result<Self, String> {
-        let url = format!("sqlite:{}?mode=rwc", db_path.display());
-        let options = SqliteConnectOptions::from_str(&url).map_err(|e| e.to_string())?.create_if_missing(true);
-        let pool =
-            SqlitePoolOptions::new().max_connections(5).connect_with(options).await.map_err(|e| e.to_string())?;
+        let db_path = db_path.to_string_lossy().to_string();
+        let db = connect_path_create_if_missing(&db_path).await?;
+        let storage = Self { db };
+        storage.init_schema().await?;
+        Ok(storage)
+    }
 
-        for statement in SCHEMA_STATEMENTS {
-            sqlx::query(statement).execute(&pool).await.map_err(|e| e.to_string())?;
-        }
-        ensure_history_columns(&pool).await?;
+    async fn init_schema(&self) -> Result<(), String> {
+        self.db.with_connection(|conn| {
+            for statement in SCHEMA_STATEMENTS {
+                conn.execute(statement, []).map_err(|e| e.to_string())?;
+            }
+            ensure_history_columns_sync(conn)?;
+            Ok(())
+        })
+    }
 
-        Ok(Self { db: pool })
+    async fn with_conn<T, F>(&self, f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+    {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || db.with_connection(f)).await.map_err(|e| e.to_string())?
     }
 }
 
-async fn ensure_history_columns(pool: &SqlitePool) -> Result<(), String> {
+fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
     const COLUMNS: &[(&str, &str)] = &[
         ("activity_kind", "TEXT NOT NULL DEFAULT 'query'"),
         ("connection_id", "TEXT NOT NULL DEFAULT ''"),
@@ -129,169 +139,156 @@ async fn ensure_history_columns(pool: &SqlitePool) -> Result<(), String> {
         ("details_json", "TEXT"),
     ];
 
-    let rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('history')")
-        .fetch_all(pool)
-        .await
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('history')").map_err(|e| e.to_string())?;
+    let existing = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<HashSet<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let existing: std::collections::HashSet<String> = rows.into_iter().map(|(name,)| name).collect();
+
     for (name, definition) in COLUMNS {
         if existing.contains(*name) {
             continue;
         }
-        sqlx::query(&format!("ALTER TABLE history ADD COLUMN {name} {definition}"))
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        conn.execute(&format!("ALTER TABLE history ADD COLUMN {name} {definition}"), []).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // History
-// ---------------------------------------------------------------------------
-
-#[derive(sqlx::FromRow)]
-struct HistoryRow {
-    id: String,
-    connection_id: String,
-    connection_name: String,
-    database: String,
-    sql_text: String,
-    executed_at: String,
-    execution_time_ms: i64,
-    success: bool,
-    error: Option<String>,
-    activity_kind: String,
-    operation: String,
-    target: String,
-    affected_rows: Option<i64>,
-    rollback_sql: Option<String>,
-    details_json: Option<String>,
-}
 
 impl Storage {
     pub async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO history \
-             (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
-              activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&entry.id)
-        .bind(&entry.connection_name)
-        .bind(&entry.database)
-        .bind(&entry.sql)
-        .bind(&entry.executed_at)
-        .bind(entry.execution_time_ms as i64)
-        .bind(entry.success)
-        .bind(&entry.error)
-        .bind(&entry.activity_kind)
-        .bind(&entry.connection_id)
-        .bind(&entry.operation)
-        .bind(&entry.target)
-        .bind(entry.affected_rows)
-        .bind(&entry.rollback_sql)
-        .bind(&entry.details_json)
-        .execute(&self.db)
-        .await
-        .map_err(|e| e.to_string())?;
+        let entry = entry.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO history \
+                 (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
+                  activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    entry.id,
+                    entry.connection_name,
+                    entry.database,
+                    entry.sql,
+                    entry.executed_at,
+                    entry.execution_time_ms as i64,
+                    entry.success,
+                    entry.error,
+                    entry.activity_kind,
+                    entry.connection_id,
+                    entry.operation,
+                    entry.target,
+                    entry.affected_rows,
+                    entry.rollback_sql,
+                    entry.details_json
+                ],
+            )
+            .map_err(|e| e.to_string())?;
 
-        // Keep at most MAX_HISTORY entries
-        sqlx::query(
-            "DELETE FROM history WHERE id NOT IN \
-             (SELECT id FROM history ORDER BY executed_at DESC LIMIT 1000)",
-        )
-        .execute(&self.db)
+            conn.execute(
+                "DELETE FROM history WHERE id NOT IN \
+                 (SELECT id FROM history ORDER BY executed_at DESC LIMIT ?1)",
+                [MAX_HISTORY as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-
-        Ok(())
     }
 
     pub async fn load_history_entries(&self, limit: usize, offset: usize) -> Result<Vec<HistoryEntry>, String> {
-        let rows: Vec<HistoryRow> = sqlx::query_as(
-            "SELECT id, connection_name, database, sql_text, executed_at, \
-             execution_time_ms, success, error, activity_kind, connection_id, operation, target, \
-             affected_rows, rollback_sql, details_json \
-             FROM history ORDER BY executed_at DESC LIMIT ? OFFSET ?",
-        )
-        .bind(limit as i64)
-        .bind(offset as i64)
-        .fetch_all(&self.db)
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
+                     error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                     FROM history ORDER BY executed_at DESC LIMIT ?1 OFFSET ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![limit as i64, offset as i64], |row| {
+                    Ok(HistoryEntry {
+                        id: row.get(0)?,
+                        connection_name: row.get(1)?,
+                        database: row.get(2)?,
+                        sql: row.get(3)?,
+                        executed_at: row.get(4)?,
+                        execution_time_ms: row.get::<_, i64>(5)? as u128,
+                        success: row.get(6)?,
+                        error: row.get(7)?,
+                        activity_kind: {
+                            let value: String = row.get(8)?;
+                            if value.is_empty() {
+                                "query".to_string()
+                            } else {
+                                value
+                            }
+                        },
+                        connection_id: row.get(9)?,
+                        operation: row.get(10)?,
+                        target: row.get(11)?,
+                        affected_rows: row.get(12)?,
+                        rollback_sql: row.get(13)?,
+                        details_json: row.get(14)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| HistoryEntry {
-                id: r.id,
-                connection_id: r.connection_id,
-                connection_name: r.connection_name,
-                database: r.database,
-                sql: r.sql_text,
-                executed_at: r.executed_at,
-                execution_time_ms: r.execution_time_ms as u128,
-                success: r.success,
-                error: r.error,
-                activity_kind: if r.activity_kind.is_empty() { "query".to_string() } else { r.activity_kind },
-                operation: r.operation,
-                target: r.target,
-                affected_rows: r.affected_rows,
-                rollback_sql: r.rollback_sql,
-                details_json: r.details_json,
-            })
-            .collect())
     }
 
     pub async fn clear_history(&self) -> Result<(), String> {
-        sqlx::query("DELETE FROM history").execute(&self.db).await.map_err(|e| e.to_string())?;
-        Ok(())
+        self.with_conn(|conn| conn.execute("DELETE FROM history", []).map(|_| ()).map_err(|e| e.to_string())).await
     }
 
     pub async fn delete_history_entry(&self, id: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM history WHERE id = ?").bind(id).execute(&self.db).await.map_err(|e| e.to_string())?;
-        Ok(())
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM history WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
     }
 }
 
-// ---------------------------------------------------------------------------
 // AI Config
-// ---------------------------------------------------------------------------
 
 impl Storage {
     pub async fn save_ai_config(&self, config: &AiConfig) -> Result<(), String> {
         let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-        sqlx::query("INSERT OR REPLACE INTO ai_config (id, config_json) VALUES (1, ?)")
-            .bind(&json)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.with_conn(move |conn| {
+            conn.execute("INSERT OR REPLACE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn load_ai_config(&self) -> Result<Option<AiConfig>, String> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT config_json FROM ai_config WHERE id = 1")
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        match row {
-            Some((json,)) => serde_json::from_str(&json).map(Some).map_err(|e| e.to_string()),
-            None => Ok(None),
-        }
+        let json: Option<String> = self
+            .with_conn(|conn| {
+                conn.query_row("SELECT config_json FROM ai_config WHERE id = 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
+        json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
     }
 }
 
-// ---------------------------------------------------------------------------
 // App Settings
-// ---------------------------------------------------------------------------
 
 impl Storage {
     async fn load_app_settings_json(&self) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT settings_json FROM app_settings WHERE id = 1")
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        let Some((json,)) = row else {
+        let json: Option<String> = self
+            .with_conn(|conn| {
+                conn.query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
+        let Some(json) = json else {
             return Ok(serde_json::Map::new());
         };
         match serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())? {
@@ -305,12 +302,12 @@ impl Storage {
         settings: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String> {
         let json = serde_json::Value::Object(settings.clone()).to_string();
-        sqlx::query("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?)")
-            .bind(&json)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.with_conn(move |conn| {
+            conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_password_hash(&self, hash: &str) -> Result<(), String> {
@@ -343,7 +340,7 @@ impl Storage {
 
     pub async fn save_pinned_tree_node_ids(&self, ids: &[String]) -> Result<(), String> {
         let mut settings = self.load_app_settings_json().await?;
-        let values = ids.iter().map(|id| serde_json::Value::String(id.clone())).collect::<Vec<serde_json::Value>>();
+        let values = ids.iter().map(|id| serde_json::Value::String(id.clone())).collect::<Vec<_>>();
         settings.insert("pinned_tree_node_ids".to_string(), serde_json::Value::Array(values));
         self.save_app_settings_json(&settings).await
     }
@@ -360,155 +357,140 @@ impl Storage {
     }
 }
 
-// ---------------------------------------------------------------------------
 // AI Conversations
-// ---------------------------------------------------------------------------
-
-#[derive(sqlx::FromRow)]
-struct AiConversationRow {
-    id: String,
-    title: String,
-    connection_name: String,
-    database: String,
-    messages_json: String,
-    created_at: String,
-    updated_at: String,
-}
 
 impl Storage {
     pub async fn save_ai_conversation(&self, conv: &AiConversation) -> Result<(), String> {
+        let conv = conv.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO ai_conversations \
-             (id, title, connection_name, database, messages_json, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&conv.id)
-        .bind(&conv.title)
-        .bind(&conv.connection_name)
-        .bind(&conv.database)
-        .bind(&messages_json)
-        .bind(&conv.created_at)
-        .bind(&conv.updated_at)
-        .execute(&self.db)
-        .await
-        .map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO ai_conversations \
+                 (id, title, connection_name, database, messages_json, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    conv.id,
+                    conv.title,
+                    conv.connection_name,
+                    conv.database,
+                    messages_json,
+                    conv.created_at,
+                    conv.updated_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
 
-        // Keep at most 50 conversations
-        sqlx::query(
-            "DELETE FROM ai_conversations WHERE id NOT IN \
-             (SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT 50)",
-        )
-        .execute(&self.db)
+            conn.execute(
+                "DELETE FROM ai_conversations WHERE id NOT IN \
+                 (SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT 50)",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-
-        Ok(())
     }
 
     pub async fn load_ai_conversations(&self) -> Result<Vec<AiConversation>, String> {
-        let rows: Vec<AiConversationRow> = sqlx::query_as(
-            "SELECT id, title, connection_name, database, messages_json, \
-             created_at, updated_at \
-             FROM ai_conversations ORDER BY updated_at DESC",
-        )
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        rows.into_iter()
-            .map(|r| {
-                let messages: Vec<AiChatMessage> = serde_json::from_str(&r.messages_json).map_err(|e| e.to_string())?;
-                Ok(AiConversation {
-                    id: r.id,
-                    title: r.title,
-                    connection_name: r.connection_name,
-                    database: r.database,
-                    messages,
-                    created_at: r.created_at,
-                    updated_at: r.updated_at,
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, connection_name, database, messages_json, created_at, updated_at \
+                     FROM ai_conversations ORDER BY updated_at DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let messages_json: String = row.get(4)?;
+                    let messages: Vec<AiChatMessage> =
+                        serde_json::from_str(&messages_json).map_err(map_from_sql_err)?;
+                    Ok(AiConversation {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        connection_name: row.get(2)?,
+                        database: row.get(3)?,
+                        messages,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                    })
                 })
-            })
-            .collect()
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn delete_ai_conversation(&self, id: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM ai_conversations WHERE id = ?")
-            .bind(id)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM ai_conversations WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
     }
 }
 
-// ---------------------------------------------------------------------------
-// Connections (with inline secrets)
-// ---------------------------------------------------------------------------
+// Connections
 
 impl Storage {
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
-        let mut tx = self.db.begin().await.map_err(|e| e.to_string())?;
+        let configs = configs.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
 
-        sqlx::query("DELETE FROM connections").execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            for config in &configs {
+                let config = config.canonicalized();
+                let config_id = config.id.clone();
+                let mut sanitized = config.clone();
+                sanitized.password = String::new();
+                sanitized.ssh_password = String::new();
+                sanitized.ssh_key_passphrase = String::new();
+                sanitized.proxy_password = String::new();
+                sanitized.connection_string = None;
+                let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
-        for config in configs {
-            let config = config.canonicalized();
-            // Store config without secrets
-            let mut sanitized = config.clone();
-            sanitized.password = String::new();
-            sanitized.ssh_password = String::new();
-            sanitized.ssh_key_passphrase = String::new();
-            sanitized.proxy_password = String::new();
-            sanitized.connection_string = None;
-            let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
-
-            sqlx::query("INSERT INTO connections (id, config_json) VALUES (?, ?)")
-                .bind(&config.id)
-                .bind(&json)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            // Store secrets
-            persist_secret_in_tx(&mut tx, &config.id, "password", &config.password).await?;
-            persist_secret_in_tx(&mut tx, &config.id, "ssh_password", &config.ssh_password).await?;
-            persist_secret_in_tx(&mut tx, &config.id, "ssh_key_passphrase", &config.ssh_key_passphrase).await?;
-            persist_secret_in_tx(&mut tx, &config.id, "proxy_password", &config.proxy_password).await?;
-            if let Some(cs) = &config.connection_string {
-                persist_secret_in_tx(&mut tx, &config.id, "connection_string", cs).await?;
-            } else {
-                sqlx::query("DELETE FROM connection_secrets WHERE connection_id = ? AND key = ?")
-                    .bind(&config.id)
-                    .bind("connection_string")
-                    .execute(&mut *tx)
-                    .await
+                tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
                     .map_err(|e| e.to_string())?;
-            }
-        }
 
-        // Remove secrets for connections that no longer exist
-        if configs.is_empty() {
-            sqlx::query("DELETE FROM connection_secrets").execute(&mut *tx).await.map_err(|e| e.to_string())?;
-        } else {
-            let placeholders: Vec<&str> = configs.iter().map(|_| "?").collect();
-            let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({})", placeholders.join(","));
-            let mut query = sqlx::query(&sql);
-            for config in configs {
-                query = query.bind(&config.id);
+                persist_secret_in_tx(&tx, &config.id, "password", &config.password)?;
+                persist_secret_in_tx(&tx, &config.id, "ssh_password", &config.ssh_password)?;
+                persist_secret_in_tx(&tx, &config.id, "ssh_key_passphrase", &config.ssh_key_passphrase)?;
+                persist_secret_in_tx(&tx, &config.id, "proxy_password", &config.proxy_password)?;
+                if let Some(cs) = &config.connection_string {
+                    persist_secret_in_tx(&tx, &config.id, "connection_string", cs)?;
+                } else {
+                    tx.execute(
+                        "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                        params![config.id, "connection_string"],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
             }
-            query.execute(&mut *tx).await.map_err(|e| e.to_string())?;
-        }
 
-        tx.commit().await.map_err(|e| e.to_string())?;
-        Ok(())
+            if configs.is_empty() {
+                tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
+            } else {
+                let placeholders = vec!["?"; configs.len()].join(",");
+                let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
+                let ids = configs.iter().map(|config| &config.id as &dyn ToSql);
+                tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
+            }
+
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
-        let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, config_json FROM connections")
-            .fetch_all(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String)> = self
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare("SELECT id, config_json FROM connections").map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            })
+            .await?;
 
         let mut configs = Vec::new();
         for (id, json) in rows {
@@ -524,273 +506,252 @@ impl Storage {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Saved SQL Library
-// ---------------------------------------------------------------------------
-
-#[derive(sqlx::FromRow)]
-struct SavedSqlFolderRow {
-    id: String,
-    connection_id: String,
-    name: String,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(sqlx::FromRow)]
-struct SavedSqlFileRow {
-    id: String,
-    connection_id: String,
-    folder_id: Option<String>,
-    name: String,
-    database_name: String,
-    schema_name: Option<String>,
-    sql_text: String,
-    created_at: String,
-    updated_at: String,
-}
-
-impl From<SavedSqlFolderRow> for SavedSqlFolder {
-    fn from(row: SavedSqlFolderRow) -> Self {
-        Self {
-            id: row.id,
-            connection_id: row.connection_id,
-            name: row.name,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
-
-impl From<SavedSqlFileRow> for SavedSqlFile {
-    fn from(row: SavedSqlFileRow) -> Self {
-        Self {
-            id: row.id,
-            connection_id: row.connection_id,
-            folder_id: row.folder_id,
-            name: row.name,
-            database: row.database_name,
-            schema: row.schema_name,
-            sql: row.sql_text,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
+// Saved SQL
 
 impl Storage {
     pub async fn load_saved_sql_library(&self) -> Result<SavedSqlLibrary, String> {
-        let folder_rows: Vec<SavedSqlFolderRow> = sqlx::query_as(
-            "SELECT id, connection_id, name, created_at, updated_at \
-             FROM saved_sql_folders ORDER BY connection_id, name COLLATE NOCASE",
-        )
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| e.to_string())?;
+        self.with_conn(|conn| {
+            let mut folder_stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, name, created_at, updated_at \
+                     FROM saved_sql_folders ORDER BY connection_id, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let folders = folder_stmt
+                .query_map([], |row| {
+                    Ok(SavedSqlFolder {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        name: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
 
-        let file_rows: Vec<SavedSqlFileRow> = sqlx::query_as(
-            "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at \
-             FROM saved_sql_files ORDER BY connection_id, folder_id, name COLLATE NOCASE",
-        )
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| e.to_string())?;
+            let mut file_stmt = conn
+                .prepare(
+                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at \
+                     FROM saved_sql_files ORDER BY connection_id, folder_id, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let files = file_stmt
+                .query_map([], |row| {
+                    Ok(SavedSqlFile {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        database: row.get(4)?,
+                        schema: row.get(5)?,
+                        sql: row.get(6)?,
+                        created_at: row.get(7)?,
+                        updated_at: row.get(8)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
 
-        Ok(SavedSqlLibrary {
-            folders: folder_rows.into_iter().map(Into::into).collect(),
-            files: file_rows.into_iter().map(Into::into).collect(),
+            Ok(SavedSqlLibrary { folders, files })
         })
+        .await
     }
 
     pub async fn save_saved_sql_folder(&self, folder: &SavedSqlFolder) -> Result<(), String> {
-        sqlx::query(
-            "INSERT INTO saved_sql_folders (id, connection_id, name, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET \
-             connection_id = excluded.connection_id, \
-             name = excluded.name, \
-             updated_at = excluded.updated_at",
-        )
-        .bind(&folder.id)
-        .bind(&folder.connection_id)
-        .bind(&folder.name)
-        .bind(&folder.created_at)
-        .bind(&folder.updated_at)
-        .execute(&self.db)
+        let folder = folder.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO saved_sql_folders (id, connection_id, name, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 connection_id = excluded.connection_id, \
+                 name = excluded.name, \
+                 updated_at = excluded.updated_at",
+                params![folder.id, folder.connection_id, folder.name, folder.created_at, folder.updated_at],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub async fn delete_saved_sql_folder(&self, id: &str) -> Result<(), String> {
-        let mut tx = self.db.begin().await.map_err(|e| e.to_string())?;
-        sqlx::query("DELETE FROM saved_sql_files WHERE folder_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-        sqlx::query("DELETE FROM saved_sql_folders WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-        tx.commit().await.map_err(|e| e.to_string())?;
-        Ok(())
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM saved_sql_files WHERE folder_id = ?1", [id.as_str()]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM saved_sql_folders WHERE id = ?1", [id.as_str()]).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_saved_sql_file(&self, file: &SavedSqlFile) -> Result<(), String> {
-        sqlx::query(
-            "INSERT INTO saved_sql_files \
-             (id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET \
-             connection_id = excluded.connection_id, \
-             folder_id = excluded.folder_id, \
-             name = excluded.name, \
-             database_name = excluded.database_name, \
-             schema_name = excluded.schema_name, \
-             sql_text = excluded.sql_text, \
-             updated_at = excluded.updated_at",
-        )
-        .bind(&file.id)
-        .bind(&file.connection_id)
-        .bind(&file.folder_id)
-        .bind(&file.name)
-        .bind(&file.database)
-        .bind(&file.schema)
-        .bind(&file.sql)
-        .bind(&file.created_at)
-        .bind(&file.updated_at)
-        .execute(&self.db)
+        let file = file.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO saved_sql_files \
+                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 connection_id = excluded.connection_id, \
+                 folder_id = excluded.folder_id, \
+                 name = excluded.name, \
+                 database_name = excluded.database_name, \
+                 schema_name = excluded.schema_name, \
+                 sql_text = excluded.sql_text, \
+                 updated_at = excluded.updated_at",
+                params![
+                    file.id,
+                    file.connection_id,
+                    file.folder_id,
+                    file.name,
+                    file.database,
+                    file.schema,
+                    file.sql,
+                    file.created_at,
+                    file.updated_at
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub async fn delete_saved_sql_file(&self, id: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM saved_sql_files WHERE id = ?")
-            .bind(id)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM saved_sql_files WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
     }
 }
 
-// ---------------------------------------------------------------------------
 // Secrets
-// ---------------------------------------------------------------------------
 
 impl Storage {
     pub async fn get_secret(&self, connection_id: &str, key: &str) -> Result<Option<String>, String> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT secret FROM connection_secrets WHERE connection_id = ? AND key = ?")
-                .bind(connection_id)
-                .bind(key)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(|e| e.to_string())?;
-        Ok(row.map(|(s,)| s))
+        let connection_id = connection_id.to_string();
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT secret FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                params![connection_id, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) \
-             VALUES (?, ?, ?)",
-        )
-        .bind(connection_id)
-        .bind(key)
-        .bind(secret)
-        .execute(&self.db)
+        let connection_id = connection_id.to_string();
+        let key = key.to_string();
+        let secret = secret.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)",
+                params![connection_id, key, secret],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub async fn delete_secret(&self, connection_id: &str, key: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM connection_secrets WHERE connection_id = ? AND key = ?")
-            .bind(connection_id)
-            .bind(key)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        let connection_id = connection_id.to_string();
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                params![connection_id, key],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 }
 
-// ---------------------------------------------------------------------------
 // Layout
-// ---------------------------------------------------------------------------
 
 impl Storage {
     pub async fn save_sidebar_layout(&self, layout: &serde_json::Value) -> Result<(), String> {
         let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
-        sqlx::query("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?)")
-            .bind(&json)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.with_conn(move |conn| {
+            conn.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn load_sidebar_layout(&self) -> Result<Option<serde_json::Value>, String> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT layout_json FROM sidebar_layout WHERE id = 1")
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        match row {
-            Some((json,)) => serde_json::from_str(&json).map(Some).map_err(|e| e.to_string()),
-            None => Ok(None),
-        }
+        let json: Option<String> = self
+            .with_conn(|conn| {
+                conn.query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
+        json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
     }
 }
 
-// ---------------------------------------------------------------------------
 // Schema cache
-// ---------------------------------------------------------------------------
 
 impl Storage {
     pub async fn save_schema_cache(&self, cache_key: &str, payload: &serde_json::Value) -> Result<(), String> {
+        let cache_key = cache_key.to_string();
         let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-        sqlx::query(
-            "INSERT OR REPLACE INTO schema_cache (cache_key, payload_json, updated_at) \
-             VALUES (?, ?, datetime('now'))",
-        )
-        .bind(cache_key)
-        .bind(&json)
-        .execute(&self.db)
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_cache (cache_key, payload_json, updated_at) \
+                 VALUES (?1, ?2, datetime('now'))",
+                params![cache_key, json],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub async fn load_schema_cache(&self, cache_key: &str) -> Result<Option<serde_json::Value>, String> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT payload_json FROM schema_cache WHERE cache_key = ?")
-            .bind(cache_key)
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        match row {
-            Some((json,)) => serde_json::from_str(&json).map(Some).map_err(|e| e.to_string()),
-            None => Ok(None),
-        }
+        let cache_key = cache_key.to_string();
+        let json: Option<String> = self
+            .with_conn(move |conn| {
+                conn.query_row("SELECT payload_json FROM schema_cache WHERE cache_key = ?1", [cache_key], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|e| e.to_string())
+            })
+            .await?;
+        json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
     }
 
     pub async fn delete_schema_cache_prefix(&self, prefix: &str) -> Result<(), String> {
-        sqlx::query("DELETE FROM schema_cache WHERE cache_key = ? OR substr(cache_key, 1, ?) = ?")
-            .bind(prefix)
-            .bind(prefix.len() as i64)
-            .bind(prefix)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        let prefix = prefix.to_string();
+        let prefix_len = prefix.len() as i64;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM schema_cache WHERE cache_key = ?1 OR substr(cache_key, 1, ?2) = ?3",
+                params![prefix.clone(), prefix_len, prefix],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 }
 
-// ---------------------------------------------------------------------------
 // JSON migration
-// ---------------------------------------------------------------------------
 
 impl Storage {
     pub async fn migrate_from_json(&self, data_dir: &Path) -> Result<(), String> {
@@ -812,12 +773,16 @@ impl Storage {
         let configs: Vec<ConnectionConfig> = serde_json::from_str(&json).unwrap_or_default();
         for config in &configs {
             let config_json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-            sqlx::query("INSERT OR IGNORE INTO connections (id, config_json) VALUES (?, ?)")
-                .bind(&config.id)
-                .bind(&config_json)
-                .execute(&self.db)
-                .await
-                .map_err(|e| e.to_string())?;
+            let id = config.id.clone();
+            self.with_conn(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO connections (id, config_json) VALUES (?1, ?2)",
+                    params![id, config_json],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            })
+            .await?;
         }
         let _ = tokio::fs::rename(&path, data_dir.join("connections.json.bak")).await;
         Ok(())
@@ -829,21 +794,22 @@ impl Storage {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        let secrets: std::collections::HashMap<String, String> = serde_json::from_str(&json).unwrap_or_default();
+        let secrets: HashMap<String, String> = serde_json::from_str(&json).unwrap_or_default();
         for (key, secret) in &secrets {
-            // key format: "connection:{id}:{field}"
             let parts: Vec<&str> = key.splitn(3, ':').collect();
             if parts.len() == 3 && parts[0] == "connection" {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO connection_secrets \
-                     (connection_id, key, secret) VALUES (?, ?, ?)",
-                )
-                .bind(parts[1])
-                .bind(parts[2])
-                .bind(secret)
-                .execute(&self.db)
-                .await
-                .map_err(|e| e.to_string())?;
+                let connection_id = parts[1].to_string();
+                let field = parts[2].to_string();
+                let secret = secret.clone();
+                self.with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO connection_secrets (connection_id, key, secret) VALUES (?1, ?2, ?3)",
+                        params![connection_id, field, secret],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await?;
             }
         }
         let _ = tokio::fs::rename(&path, data_dir.join("secrets.json.bak")).await;
@@ -858,31 +824,7 @@ impl Storage {
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
         let entries: Vec<HistoryEntry> = serde_json::from_str(&json).unwrap_or_default();
         for entry in &entries {
-            sqlx::query(
-                "INSERT OR IGNORE INTO history \
-                 (id, connection_name, database, sql_text, executed_at, \
-                  execution_time_ms, success, error, activity_kind, connection_id, operation, target, \
-                  affected_rows, rollback_sql, details_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&entry.id)
-            .bind(&entry.connection_name)
-            .bind(&entry.database)
-            .bind(&entry.sql)
-            .bind(&entry.executed_at)
-            .bind(entry.execution_time_ms as i64)
-            .bind(entry.success)
-            .bind(&entry.error)
-            .bind(&entry.activity_kind)
-            .bind(&entry.connection_id)
-            .bind(&entry.operation)
-            .bind(&entry.target)
-            .bind(entry.affected_rows)
-            .bind(&entry.rollback_sql)
-            .bind(&entry.details_json)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
+            self.save_history_entry(entry).await?;
         }
         let _ = tokio::fs::rename(&path, data_dir.join("query_history.json.bak")).await;
         Ok(())
@@ -894,15 +836,18 @@ impl Storage {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        // Only migrate if the table is empty
-        let count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM ai_config").fetch_one(&self.db).await.map_err(|e| e.to_string())?;
-        if count.0 == 0 {
-            sqlx::query("INSERT OR IGNORE INTO ai_config (id, config_json) VALUES (1, ?)")
-                .bind(&json)
-                .execute(&self.db)
-                .await
-                .map_err(|e| e.to_string())?;
+        let count: i64 = self
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ai_config", [], |row| row.get(0)).map_err(|e| e.to_string())
+            })
+            .await?;
+        if count == 0 {
+            self.with_conn(move |conn| {
+                conn.execute("INSERT OR IGNORE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
         }
         let _ = tokio::fs::rename(&path, data_dir.join("ai_config.json.bak")).await;
         Ok(())
@@ -916,23 +861,27 @@ impl Storage {
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
         let conversations: Vec<AiConversation> = serde_json::from_str(&json).unwrap_or_default();
         for conv in &conversations {
+            let conv = conv.clone();
             let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
-            sqlx::query(
-                "INSERT OR IGNORE INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, \
-                  created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&conv.id)
-            .bind(&conv.title)
-            .bind(&conv.connection_name)
-            .bind(&conv.database)
-            .bind(&messages_json)
-            .bind(&conv.created_at)
-            .bind(&conv.updated_at)
-            .execute(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
+            self.with_conn(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO ai_conversations \
+                     (id, title, connection_name, database, messages_json, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        conv.id,
+                        conv.title,
+                        conv.connection_name,
+                        conv.database,
+                        messages_json,
+                        conv.created_at,
+                        conv.updated_at
+                    ],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            })
+            .await?;
         }
         let _ = tokio::fs::rename(&path, data_dir.join("ai_conversations.json.bak")).await;
         Ok(())
@@ -944,52 +893,45 @@ impl Storage {
             return Ok(());
         }
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sidebar_layout")
-            .fetch_one(&self.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        if count.0 == 0 {
-            sqlx::query("INSERT OR IGNORE INTO sidebar_layout (id, layout_json) VALUES (1, ?)")
-                .bind(&json)
-                .execute(&self.db)
-                .await
-                .map_err(|e| e.to_string())?;
+        let count: i64 = self
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM sidebar_layout", [], |row| row.get(0)).map_err(|e| e.to_string())
+            })
+            .await?;
+        if count == 0 {
+            self.with_conn(move |conn| {
+                conn.execute("INSERT OR IGNORE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await?;
         }
         let _ = tokio::fs::rename(&path, data_dir.join("sidebar_layout.json.bak")).await;
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async fn persist_secret_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+fn persist_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
     connection_id: &str,
     key: &str,
     secret: &str,
 ) -> Result<(), String> {
     if secret.is_empty() {
-        sqlx::query("DELETE FROM connection_secrets WHERE connection_id = ? AND key = ?")
-            .bind(connection_id)
-            .bind(key)
-            .execute(&mut **tx)
-            .await
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2", params![connection_id, key])
             .map_err(|e| e.to_string())?;
     } else {
-        sqlx::query(
-            "INSERT OR REPLACE INTO connection_secrets \
-             (connection_id, key, secret) VALUES (?, ?, ?)",
+        tx.execute(
+            "INSERT OR REPLACE INTO connection_secrets (connection_id, key, secret) VALUES (?, ?, ?)",
+            params![connection_id, key, secret],
         )
-        .bind(connection_id)
-        .bind(key)
-        .bind(secret)
-        .execute(&mut **tx)
-        .await
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ pub enum MysqlMode {
 pub enum PoolKind {
     Mysql(db::mysql::MySqlPool, MysqlMode),
     Postgres(sqlx::postgres::PgPool),
-    Sqlite(sqlx::sqlite::SqlitePool),
+    Sqlite(db::sqlite::SqliteHandle),
     Redis(tokio::sync::Mutex<redis::aio::MultiplexedConnection>),
     DuckDb(Arc<std::sync::Mutex<duckdb::Connection>>),
     MongoDb(mongodb::Client),
@@ -1098,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn remove_connection_pools_clears_base_and_database_scoped_pools() {
         let (state, dir) = test_app_state().await;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect(":memory:").await.unwrap();
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
 
         {
             let mut conns = state.connections.write().await;

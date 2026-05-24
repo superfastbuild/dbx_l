@@ -220,9 +220,9 @@ impl SqlStatementSplitter {
                     if let Some(new_delim) = parse_delimiter_command(last_line) {
                         self.custom_delimiter = if new_delim == ";" { None } else { Some(new_delim.to_string()) };
                         if last_line_start > 0 {
-                            let before = &self.buffer[..last_line_start];
-                            if let Some(statement) = executable_sql_slice(before, self.options) {
-                                statements.push(statement.to_string());
+                            let before = self.buffer[..last_line_start].trim();
+                            if has_executable_sql_with_options(before, self.options) {
+                                statements.push(before.to_string());
                             }
                         }
                         self.buffer.clear();
@@ -252,8 +252,8 @@ impl SqlStatementSplitter {
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
         if parse_delimiter_command(last_line).is_some() {
             let before = trimmed.rsplitn(2, '\n').nth(1).unwrap_or("").trim();
-            if let Some(statement) = executable_sql_slice(before, self.options) {
-                statements.push(statement.to_string());
+            if has_executable_sql_with_options(before, self.options) {
+                statements.push(before.to_string());
             }
             self.buffer.clear();
         } else if let Some(ref delim) = self.custom_delimiter {
@@ -266,7 +266,8 @@ impl SqlStatementSplitter {
     }
 
     fn push_current_statement(&mut self, statements: &mut Vec<String>) {
-        if let Some(statement) = executable_sql_slice(&self.buffer, self.options) {
+        let statement = self.buffer.trim();
+        if has_executable_sql_with_options(statement, self.options) {
             statements.push(statement.to_string());
         }
         self.buffer.clear();
@@ -1414,7 +1415,7 @@ SELECT 2;";
         let sql = "SELECT 1; # mysql comment\n\nSELECT 2 # trailing comment";
         assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::Mysql),
-            vec!["SELECT 1", "SELECT 2 # trailing comment"]
+            vec!["SELECT 1", "# mysql comment\n\nSELECT 2 # trailing comment"]
         );
     }
 

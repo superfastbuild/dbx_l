@@ -1103,14 +1103,19 @@ pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, table: &str) -> Result<Strin
         .ok_or_else(|| "Failed to read DDL".to_string())
 }
 
-pub async fn sqlite_ddl(pool: &sqlx::sqlite::SqlitePool, table: &str) -> Result<String, String> {
-    use sqlx::Row;
-    let row: sqlx::sqlite::SqliteRow = sqlx::query("SELECT sql FROM sqlite_master WHERE type='table' AND name=?")
-        .bind(table)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    row.try_get::<String, _>(0).map_err(|e| e.to_string())
+pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, table: &str) -> Result<String, String> {
+    let pool = pool.clone();
+    let table = table.to_string();
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1", [table], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub async fn pg_ddl(pool: &sqlx::postgres::PgPool, schema: &str, table: &str) -> Result<String, String> {
