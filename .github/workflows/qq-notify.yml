@@ -44,9 +44,7 @@ jobs:
               url = os.environ["ISSUE_URL"]
               user = os.environ["ISSUE_USER"]
               msg = "\n".join([
-                  "━━━━━━━━━━━━━━━",
                   "📋 新 Issue",
-                  "━━━━━━━━━━━━━━━",
                   f"标题: {title}",
                   f"提交者: {user}",
                   f"链接: {url}",
@@ -68,14 +66,11 @@ jobs:
               body = body.strip()
 
               msg = "\n".join([
-                  "━━━━━━━━━━━━━━━",
-                  f"🚀 新版本发布  {tag}",
-                  "━━━━━━━━━━━━━━━",
+                  f"🚀 新版本发布 {tag}",
                   "",
                   body,
                   "",
                   f"下载: {url}",
-                  "━━━━━━━━━━━━━━━",
               ])
 
           elif event in ("pull_request", "pull_request_target"):
@@ -84,24 +79,18 @@ jobs:
               if action == "opened":
                   user = os.environ["PR_USER"]
                   msg = "\n".join([
-                      "━━━━━━━━━━━━━━━",
                       "🔀 新 Pull Request",
-                      "━━━━━━━━━━━━━━━",
                       f"标题: {title}",
                       f"提交者: {user}",
                       f"链接: {url}",
-                      "━━━━━━━━━━━━━━━",
                   ])
               elif action == "closed" and os.environ.get("PR_MERGED") == "true":
                   user = os.environ.get("PR_MERGED_BY", "unknown")
                   msg = "\n".join([
-                      "━━━━━━━━━━━━━━━",
                       "✅ PR 已合并",
-                      "━━━━━━━━━━━━━━━",
                       f"标题: {title}",
                       f"合并者: {user}",
                       f"链接: {url}",
-                      "━━━━━━━━━━━━━━━",
                   ])
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -190,8 +179,7 @@ jobs:
             MSG_CONTENT="${MSG_CONTENT}
 
           🤖 AI 分析:
-          ${AI_ANALYSIS}
-          ━━━━━━━━━━━━━━━"
+          ${AI_ANALYSIS}"
           fi
 
           MSG=$(echo "$MSG_CONTENT" | jq -Rs .)
