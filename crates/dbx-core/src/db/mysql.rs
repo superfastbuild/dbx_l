@@ -262,7 +262,11 @@ pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<MySqlPool,
     connect_with_ca_cert(url, None, fallback_timeout).await
 }
 
-pub async fn connect_with_ca_cert(url: &str, ca_cert_path: Option<&str>, fallback_timeout: Duration) -> Result<MySqlPool, String> {
+pub async fn connect_with_ca_cert(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
     let pool = create_pool(url, ca_cert_path)?;
     let result = verify_pool_connection(&pool, timeout).await;
@@ -1026,6 +1030,11 @@ mod tests {
     fn mysql_with_queries_are_treated_as_result_sets() {
         let sql = "WITH RECURSIVE org_tree AS (SELECT 1 AS id) SELECT id FROM org_tree";
         assert!(is_result_set_query(sql));
+    }
+
+    #[test]
+    fn mysql_desc_queries_are_treated_as_result_sets() {
+        assert!(is_result_set_query("DESC users"));
     }
 
     #[test]

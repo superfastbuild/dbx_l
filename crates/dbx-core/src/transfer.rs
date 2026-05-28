@@ -6,6 +6,7 @@ use crate::connection::{AppState, PoolKind};
 use crate::db;
 use crate::models::connection::DatabaseType;
 use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+use crate::sql::starts_with_executable_sql_keyword;
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -821,13 +822,7 @@ pub async fn execute_on_pool(state: &AppState, pool_key: &str, sql: &str) -> Res
             tokio::task::spawn_blocking(move || {
                 let con = con.lock().map_err(|e| e.to_string())?;
                 let start = std::time::Instant::now();
-                let trimmed = sql.trim().to_uppercase();
-                if trimmed.starts_with("SELECT")
-                    || trimmed.starts_with("SHOW")
-                    || trimmed.starts_with("DESCRIBE")
-                    || trimmed.starts_with("WITH")
-                    || trimmed.starts_with("PRAGMA")
-                {
+                if starts_with_executable_sql_keyword(&sql, &["SELECT", "SHOW", "DESCRIBE", "WITH", "PRAGMA"]) {
                     let mut stmt = con.prepare(&sql).map_err(|e| e.to_string())?;
                     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
                     let stmt_ref = rows.as_ref().ok_or("DuckDB statement unavailable")?;
