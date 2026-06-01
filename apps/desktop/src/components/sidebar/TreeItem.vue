@@ -1478,6 +1478,7 @@ async function closeDatabaseConnection() {
   if (node.type !== "database" || !node.connectionId || node.database == null) return;
   try {
     await connectionStore.closeDatabaseConnection(node.connectionId, node.database);
+    queryStore.closeDatabaseTabs(node.connectionId, node.database);
     toast(t("connection.databaseConnectionClosed", { name: node.label }), 2000);
   } catch (e: any) {
     toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);

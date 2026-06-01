@@ -303,6 +303,32 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId.value = next.activeTabId;
   }
 
+  function closeDatabaseTabs(connectionId: string, database: string) {
+    const closingModes = new Set<QueryTab["mode"]>(["data", "objects", "structure", "mongo"]);
+    const closingIds = new Set(
+      tabs.value
+        .filter((tab) => tab.connectionId === connectionId && tab.database === database && closingModes.has(tab.mode))
+        .map((tab) => tab.id),
+    );
+    if (closingIds.size === 0) return;
+
+    tabs.value
+      .filter((tab) => closingIds.has(tab.id))
+      .forEach((tab) => {
+        if (tab.isExecuting) void cancelTabExecution(tab.id);
+        if (tab.isExplaining) void cancelTabExplain(tab.id);
+        void closeResultSession(tab);
+        void closeClientConnectionSession(tab);
+        clearResultPayload(tab);
+      });
+
+    const activeClosingIndex = tabs.value.findIndex((tab) => tab.id === activeTabId.value && closingIds.has(tab.id));
+    tabs.value = tabs.value.filter((tab) => !closingIds.has(tab.id));
+    if (activeClosingIndex >= 0) {
+      activeTabId.value = tabs.value[Math.min(activeClosingIndex, tabs.value.length - 1)]?.id ?? null;
+    }
+  }
+
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
@@ -1221,6 +1247,7 @@ export const useQueryStore = defineStore("query", () => {
     closeTab,
     closeOtherTabs,
     closeAllTabs,
+    closeDatabaseTabs,
     updateSql,
     renameTab,
     openObjectBrowser,

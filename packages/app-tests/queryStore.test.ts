@@ -310,6 +310,56 @@ test("closing tabs clears removed result payloads before dropping tab references
   }
 });
 
+test("closing database tabs removes browser tabs for that database only", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useQueryStore();
+    const dataId = store.createTab("conn-1", "db", "users", "data", "public");
+    const objectsId = store.openObjectBrowser("conn-1", "db", "public");
+    const structureId = store.openTableStructure("conn-1", "db", "public", "users");
+    const mongoId = store.createTab("conn-1", "db", "orders", "mongo");
+    const queryId = store.createTab("conn-1", "db", "draft query", "query");
+    const otherDbId = store.createTab("conn-1", "analytics", "users", "data", "public");
+    const otherConnectionId = store.createTab("conn-2", "db", "users", "data", "public");
+    const structureTab = store.tabs.find((item) => item.id === structureId);
+
+    assert.ok(structureTab);
+    structureTab.result = {
+      columns: ["payload"],
+      rows: [["structure"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      session_id: "session-structure",
+    };
+    structureTab.resultSessionId = "session-structure";
+    store.activeTabId = structureId;
+
+    store.closeDatabaseTabs("conn-1", "db");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(
+      store.tabs.map((tab) => tab.id),
+      [queryId, otherDbId, otherConnectionId],
+    );
+    assert.equal(store.activeTabId, otherConnectionId);
+    assert.equal(
+      store.tabs.some((tab) => [dataId, objectsId, structureId, mongoId].includes(tab.id)),
+      false,
+    );
+    assert.equal(structureTab.result, undefined);
+    assert.equal(structureTab.resultSessionId, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("starting a new query clears the previous result payload immediately", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
