@@ -8,6 +8,8 @@ use crate::db::agent_driver::{AgentDriverClient, AgentMethod};
 use crate::models::connection::DatabaseType;
 
 pub const DEFAULT_JRE_KEY: &str = "21";
+pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
+pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
 
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
@@ -245,6 +247,8 @@ pub struct DriverStoreUsage {
     pub total_bytes: u64,
     pub jre_bytes: u64,
     pub agent_driver_bytes: u64,
+    #[serde(default)]
+    pub download_cache_bytes: u64,
     pub jdbc_plugin_bytes: u64,
     pub jdbc_driver_bytes: u64,
     pub jres: Vec<DriverStoreUsageItem>,
@@ -320,6 +324,14 @@ impl AgentManager {
         self.base_dir.join("drivers").join(db_type).join("agent.jar")
     }
 
+    pub fn download_cache_dir(&self) -> PathBuf {
+        self.base_dir.join(DOWNLOAD_CACHE_DIR_NAME)
+    }
+
+    pub fn download_cache_max_age_days(&self) -> u64 {
+        DOWNLOAD_CACHE_MAX_AGE_DAYS
+    }
+
     fn state_path(&self) -> PathBuf {
         self.base_dir.join("state.json")
     }
@@ -390,14 +402,17 @@ impl AgentManager {
         let jdbc_driver_bytes = path_size_bytes(&jdbc_driver_root);
         let jdbc_total_bytes = path_size_bytes(&jdbc_root);
         let jdbc_plugin_bytes = jdbc_total_bytes.saturating_sub(jdbc_driver_bytes);
+        let download_cache_bytes = path_size_bytes(&self.download_cache_dir());
 
         DriverStoreUsage {
             total_bytes: jre_bytes
                 .saturating_add(agent_driver_bytes)
+                .saturating_add(download_cache_bytes)
                 .saturating_add(jdbc_plugin_bytes)
                 .saturating_add(jdbc_driver_bytes),
             jre_bytes,
             agent_driver_bytes,
+            download_cache_bytes,
             jdbc_plugin_bytes,
             jdbc_driver_bytes,
             jres,
@@ -438,6 +453,10 @@ impl AgentManager {
 
     pub async fn stop_daemon_by_key(&self, agent_key: &str) {
         crate::agent_runtime::stop_daemon_by_key(self, agent_key).await;
+    }
+
+    pub async fn active_daemon_keys(&self) -> Vec<String> {
+        self.daemons.lock().await.keys().cloned().collect()
     }
 
     pub fn db_type_to_agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {

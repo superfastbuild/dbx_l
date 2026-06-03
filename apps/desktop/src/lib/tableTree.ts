@@ -231,13 +231,20 @@ export function mergeTableInfosIntoObjects(
     if (objectType !== "TABLE" && objectType !== "VIEW") continue;
     const name = normalizeDatabaseObjectName(table.name);
     if (!name) continue;
-    const key = `${objectType}\0${(schema || "").toLowerCase()}\0${name.toLowerCase()}`;
+    const matchingObject = objects.find((obj) => {
+      const objName = normalizeDatabaseObjectName(obj.name);
+      if (objName.toLowerCase() !== name.toLowerCase()) return false;
+      return normalizeObjectType(obj.object_type) === objectType;
+    });
+    const tableSchema =
+      schema ?? (matchingObject?.schema ? normalizeDatabaseObjectName(matchingObject.schema) : undefined);
+    const key = `${objectType}\0${(tableSchema || "").toLowerCase()}\0${name.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     merged.push({
       name,
       object_type: objectType,
-      schema,
+      schema: tableSchema,
       comment: table.comment,
       created_at: undefined,
       updated_at: undefined,

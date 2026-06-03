@@ -18,6 +18,8 @@ export interface BinaryCellDownloadResult {
 export const BINARY_CELL_DOWNLOAD_MODES: BinaryCellDownloadMode[] = ["binary", "utf8", "gbk"];
 
 const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]+)$/;
+const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;
+const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE =
   /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
 
@@ -30,8 +32,12 @@ export function parseBinaryCellHexValue(value: CellValue): Uint8Array | null {
   const match = value.trim().match(HEX_VALUE_RE);
   if (!match) return null;
 
-  const hex = match[1].replace(/\s+/g, "");
-  if (!hex || hex.length % 2 !== 0) return null;
+  return bytesFromHex(match[1]);
+}
+
+function bytesFromHex(value: string): Uint8Array | null {
+  const hex = value.replace(/\s+/g, "");
+  if (!hex || hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
 
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {
@@ -42,20 +48,80 @@ export function parseBinaryCellHexValue(value: CellValue): Uint8Array | null {
   return bytes;
 }
 
+function bytesFromByteArray(value: unknown): Uint8Array | null {
+  if (!Array.isArray(value)) return null;
+  const bytes = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (!Number.isInteger(item) || item < 0 || item > 255) return null;
+    bytes[i] = item;
+  }
+  return bytes;
+}
+
+function bytesFromBufferLikeObject(value: unknown): Uint8Array | null {
+  if (!value || typeof value !== "object") return null;
+  const data = (value as { data?: unknown }).data;
+  return bytesFromByteArray(data);
+}
+
+export function parseBinaryCellBytes(value: unknown, columnType?: string): Uint8Array | null {
+  if (typeof value === "string") {
+    const prefixed = parseBinaryCellHexValue(value);
+    if (prefixed) return prefixed;
+
+    const trimmed = value.trim();
+    if (HEX_ESCAPE_RE.test(trimmed)) {
+      return bytesFromHex(trimmed.replace(/\\x/gi, ""));
+    }
+
+    if (isBinaryCellColumnType(columnType) && BARE_HEX_RE.test(trimmed)) {
+      return bytesFromHex(trimmed);
+    }
+  }
+
+  return bytesFromByteArray(value) ?? bytesFromBufferLikeObject(value);
+}
+
 export function isBinaryCellColumnType(columnType?: string): boolean {
   const type = (columnType ?? "").trim();
   return !!type && BINARY_TYPE_RE.test(type);
 }
 
-export function canDownloadBinaryCellValue(value: CellValue, columnType?: string): boolean {
-  if (!parseBinaryCellHexValue(value)) return false;
-  return isBinaryCellColumnType(columnType) || typeof value === "string";
+export function canDownloadBinaryCellValue(value: unknown, columnType?: string): boolean {
+  return !!parseBinaryCellBytes(value, columnType);
 }
 
-export function binaryCellDownloadPayload(value: CellValue, mode: BinaryCellDownloadMode): BinaryCellDownloadPayload {
-  const bytes = parseBinaryCellHexValue(value);
+export function binaryCellDisplayText(value: unknown, columnType?: string): string | null {
+  const bytes = parseBinaryCellBytes(value, columnType);
+  if (!bytes || !isBinaryCellColumnType(columnType)) return null;
+  return `${binaryCellDisplayLabel(columnType)} [${formatBinaryCellByteSize(bytes.length)}]`;
+}
+
+function binaryCellDisplayLabel(columnType?: string): string {
+  const base = (columnType ?? "")
+    .trim()
+    .split(/[(:\s]/)[0]
+    .toUpperCase();
+  if (!base) return "BLOB";
+  if (base.includes("BLOB")) return "BLOB";
+  return base;
+}
+
+function formatBinaryCellByteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+export function binaryCellDownloadPayload(
+  value: unknown,
+  mode: BinaryCellDownloadMode,
+  columnType?: string,
+): BinaryCellDownloadPayload {
+  const bytes = parseBinaryCellBytes(value, columnType);
   if (!bytes) {
-    throw new Error("Cell value is not a hexadecimal binary value.");
+    throw new Error("Cell value is not a downloadable binary value.");
   }
 
   if (mode === "binary") {

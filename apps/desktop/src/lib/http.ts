@@ -28,6 +28,8 @@ import type {
   AiConversation,
   AiModelInfo,
   DriverStoreUsage,
+  UpgradeAllAgentDriversResult,
+  AgentUpdateBlocker,
   DesktopSettings,
   DriverInstallProgress,
   JavaRuntimeConfig,
@@ -242,9 +244,12 @@ export async function installAgent(dbType: string): Promise<void> {
   await post("/api/agents/install", { dbType });
 }
 
-export async function upgradeAllAgents(): Promise<number> {
-  const result: { count: number } = await post("/api/agents/upgrade-all", {});
-  return result.count;
+export async function upgradeAllAgents(): Promise<UpgradeAllAgentDriversResult> {
+  return post("/api/agents/upgrade-all", {});
+}
+
+export async function checkAgentUpdateBlockers(_dbTypes: string[]): Promise<AgentUpdateBlocker[]> {
+  return [];
 }
 
 export async function uninstallAgent(dbType: string): Promise<void> {

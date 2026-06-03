@@ -51,6 +51,7 @@ export const listInstalledAgents = forward("listInstalledAgents");
 export const getDriverStoreUsage = forward("getDriverStoreUsage");
 export const installAgent = forward("installAgent");
 export const upgradeAllAgents = forward("upgradeAllAgents");
+export const checkAgentUpdateBlockers = forward("checkAgentUpdateBlockers");
 export const uninstallAgent = forward("uninstallAgent");
 export const getAgentJavaRuntimeConfig = forward("getAgentJavaRuntimeConfig");
 export const setAgentJavaRuntimeConfig = forward("setAgentJavaRuntimeConfig");

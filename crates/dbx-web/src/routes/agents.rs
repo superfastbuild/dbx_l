@@ -55,6 +55,7 @@ pub async fn install_agent(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AgentTypeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&req.db_type)).await.map_err(AppError)?;
     let tx = progress_sender(&state, "global").await;
     install_agent_driver(&state.app.agent_manager, &req.db_type, |event| send_progress_event(&tx, event))
         .await
@@ -63,11 +64,16 @@ pub async fn install_agent(
 }
 
 pub async fn upgrade_all_agents(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
+    let registry = fetch_registry().await.map_err(AppError)?;
+    let agents = build_agent_list(&state.app.agent_manager, Some(&registry));
+    let updatable: Vec<String> =
+        agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
+    ensure_no_agent_update_blockers(&state.app, &updatable).await.map_err(AppError)?;
     let tx = progress_sender(&state, "global").await;
-    let total = upgrade_all_agent_drivers(&state.app.agent_manager, |event| send_progress_event(&tx, event))
+    let result = upgrade_all_agent_drivers(&state.app.agent_manager, |event| send_progress_event(&tx, event))
         .await
         .map_err(AppError)?;
-    Ok(Json(serde_json::json!({ "count": total })))
+    Ok(Json(serde_json::to_value(result).map_err(|err| AppError(err.to_string()))?))
 }
 
 pub async fn uninstall_agent(
@@ -222,5 +228,28 @@ async fn progress_sender(state: &WebState, operation_id: &str) -> broadcast::Sen
 fn send_progress_event(tx: &broadcast::Sender<String>, event: AgentProgressEvent) {
     if let Ok(payload) = serde_json::to_string(&event) {
         let _ = tx.send(payload);
+    }
+}
+
+async fn ensure_no_agent_update_blockers(
+    state: &dbx_core::connection::AppState,
+    db_types: &[String],
+) -> Result<(), String> {
+    let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
+    if candidate_keys.is_empty() {
+        return Ok(());
+    }
+    let mut blockers = state
+        .active_agent_driver_keys()
+        .await
+        .into_iter()
+        .filter(|key| candidate_keys.contains(key.as_str()))
+        .map(|key| dbx_core::agent_catalog::label_for_key(&key).unwrap_or(&key).to_string())
+        .collect::<Vec<_>>();
+    blockers.sort();
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("请先关闭以下数据库连接后再更新驱动: {}", blockers.join(", ")))
     }
 }

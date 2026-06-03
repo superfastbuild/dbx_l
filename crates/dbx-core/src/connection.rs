@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -650,6 +650,36 @@ impl AppState {
         Ok(closed)
     }
 
+    pub async fn active_agent_driver_keys(&self) -> HashSet<String> {
+        let configs = self.configs.read().await;
+        let connections = self.connections.read().await;
+        let mut keys = HashSet::new();
+
+        for (pool_key, pool) in connections.iter() {
+            if !matches!(pool, PoolKind::Agent(_)) {
+                continue;
+            }
+            let Some(config) = config_for_pool_key(pool_key, &configs) else {
+                continue;
+            };
+            if let Some(agent_key) = crate::agent_manager::AgentManager::db_type_to_agent_key(
+                &config.db_type,
+                config.driver_profile.as_deref(),
+            ) {
+                keys.insert(agent_key.to_string());
+            }
+        }
+
+        drop(connections);
+        drop(configs);
+
+        for key in self.agent_manager.active_daemon_keys().await {
+            keys.insert(key);
+        }
+
+        keys
+    }
+
     pub async fn duckdb_existing_pool_is_usable_for_config(&self, config: &ConnectionConfig) -> Result<bool, String> {
         if config.db_type != DatabaseType::DuckDb {
             return Ok(false);
@@ -798,6 +828,19 @@ fn session_scoped_pool_key(base_pool_key: String, client_session_id: Option<&str
     normalize_client_session_id(client_session_id)
         .map(|session| format!("{base_pool_key}:session:{session}"))
         .unwrap_or(base_pool_key)
+}
+
+fn config_for_pool_key<'a>(
+    pool_key: &str,
+    configs: &'a HashMap<String, ConnectionConfig>,
+) -> Option<&'a ConnectionConfig> {
+    configs
+        .iter()
+        .filter(|(connection_id, _)| {
+            pool_key.strip_prefix(connection_id.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        })
+        .max_by_key(|(connection_id, _)| connection_id.len())
+        .map(|(_, config)| config)
 }
 
 fn session_scoped_pool_key_for(
@@ -1140,7 +1183,7 @@ mod tests {
 
         let params = agent_connect_params(&config, "oracle.example.com", 1521, "ORCLPDB1");
 
-        assert_eq!(params["database"], "ORCLPDB1");
+        assert_eq!(params["database"], "SYSDBA:ORCLPDB1");
         assert_eq!(params["sysdba"], true);
         assert_eq!(params["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1");
     }

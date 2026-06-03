@@ -512,6 +512,7 @@ pub fn run() {
             commands::agents::get_driver_store_usage,
             commands::agents::install_agent,
             commands::agents::upgrade_all_agents,
+            commands::agents::check_agent_update_blockers,
             commands::agents::uninstall_agent,
             commands::agents::check_jre_installed,
             commands::agents::get_agent_java_runtime_config,

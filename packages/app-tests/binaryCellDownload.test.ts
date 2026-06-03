@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  binaryCellDisplayText,
   binaryCellDownloadFileName,
   binaryCellDownloadPayload,
   canDownloadBinaryCellValue,
   isBinaryCellColumnType,
+  parseBinaryCellBytes,
   parseBinaryCellHexValue,
 } from "../../apps/desktop/src/lib/binaryCellDownload.ts";
 
@@ -20,6 +22,15 @@ test("parseBinaryCellHexValue rejects non-hex and odd-length payloads", () => {
   assert.equal(parseBinaryCellHexValue(null), null);
 });
 
+test("parseBinaryCellBytes accepts common driver binary shapes", () => {
+  assert.deepEqual(Array.from(parseBinaryCellBytes("89504e47", "BLOB") ?? []), [137, 80, 78, 71]);
+  assert.deepEqual(Array.from(parseBinaryCellBytes("\\x89\\x50\\x4e\\x47") ?? []), [137, 80, 78, 71]);
+  assert.deepEqual(Array.from(parseBinaryCellBytes([0, 1, 171, 255]) ?? []), [0, 1, 171, 255]);
+  assert.deepEqual(Array.from(parseBinaryCellBytes({ type: "Buffer", data: [222, 173, 190, 239] }) ?? []), [
+    222, 173, 190, 239,
+  ]);
+});
+
 test("binary cell download detects common blob column types", () => {
   assert.equal(isBinaryCellColumnType("BLOB"), true);
   assert.equal(isBinaryCellColumnType("RAW(2000)"), true);
@@ -30,7 +41,14 @@ test("binary cell download detects common blob column types", () => {
 test("canDownloadBinaryCellValue allows displayed binary hex strings", () => {
   assert.equal(canDownloadBinaryCellValue("0x89504e47", "BLOB"), true);
   assert.equal(canDownloadBinaryCellValue("0x89504e47"), true);
-  assert.equal(canDownloadBinaryCellValue("89504e47", "BLOB"), false);
+  assert.equal(canDownloadBinaryCellValue("89504e47", "BLOB"), true);
+  assert.equal(canDownloadBinaryCellValue("89504e47"), false);
+});
+
+test("binaryCellDisplayText summarizes binary values for grid display", () => {
+  assert.equal(binaryCellDisplayText("0x89504e47", "BLOB"), "BLOB [4 bytes]");
+  assert.equal(binaryCellDisplayText(`0x${"00".repeat(2048)}`, "VARBINARY(2048)"), "VARBINARY [2.0 KB]");
+  assert.equal(binaryCellDisplayText("0x89504e47"), null);
 });
 
 test("binaryCellDownloadPayload builds raw and decoded payloads", () => {

@@ -6,9 +6,15 @@ use dbx_core::agent_manager::{AgentDriverInfo, DriverStoreUsage, JavaRuntimeConf
 use dbx_core::agent_service::{
     build_agent_list, fetch_registry, import_agent_jar, import_agents_from_zip as import_agents_from_zip_core,
     install_agent_driver, invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
-    upgrade_all_agent_drivers, AgentProgressEvent,
+    upgrade_all_agent_drivers, AgentProgressEvent, UpgradeAllAgentDriversResult,
 };
 use dbx_core::connection::AppState;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentUpdateBlocker {
+    pub db_type: String,
+    pub label: String,
+}
 
 #[tauri::command]
 pub async fn list_installed_agents_local(state: State<'_, Arc<AppState>>) -> Result<Vec<AgentDriverInfo>, String> {
@@ -32,14 +38,31 @@ pub async fn install_agent(
     state: State<'_, Arc<AppState>>,
     db_type: String,
 ) -> Result<(), String> {
+    ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
     let app_handle = app.clone();
     install_agent_driver(&state.agent_manager, &db_type, move |event| emit_agent_progress(&app_handle, event)).await
 }
 
 #[tauri::command]
-pub async fn upgrade_all_agents(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+pub async fn upgrade_all_agents(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<UpgradeAllAgentDriversResult, String> {
+    let registry = fetch_registry().await?;
+    let agents = build_agent_list(&state.agent_manager, Some(&registry));
+    let updatable: Vec<String> =
+        agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
+    ensure_no_agent_update_blockers(state.inner().as_ref(), &updatable).await?;
     let app_handle = app.clone();
     upgrade_all_agent_drivers(&state.agent_manager, move |event| emit_agent_progress(&app_handle, event)).await
+}
+
+#[tauri::command]
+pub async fn check_agent_update_blockers(
+    state: State<'_, Arc<AppState>>,
+    db_types: Vec<String>,
+) -> Result<Vec<AgentUpdateBlocker>, String> {
+    Ok(agent_update_blockers(state.inner().as_ref(), &db_types).await)
 }
 
 #[tauri::command]
@@ -130,4 +153,31 @@ pub async fn reinstall_jre(
 
 fn emit_agent_progress(app: &tauri::AppHandle, event: AgentProgressEvent) {
     let _ = app.emit("agent-install-progress", event);
+}
+
+async fn ensure_no_agent_update_blockers(state: &AppState, db_types: &[String]) -> Result<(), String> {
+    let blockers = agent_update_blockers(state, db_types).await;
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    let labels = blockers.into_iter().map(|blocker| blocker.label).collect::<Vec<_>>().join(", ");
+    Err(format!("请先关闭以下数据库连接后再更新驱动: {labels}"))
+}
+
+async fn agent_update_blockers(state: &AppState, db_types: &[String]) -> Vec<AgentUpdateBlocker> {
+    let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
+    if candidate_keys.is_empty() {
+        return Vec::new();
+    }
+    let active_keys = state.active_agent_driver_keys().await;
+    let mut blockers = active_keys
+        .into_iter()
+        .filter(|key| candidate_keys.contains(key.as_str()))
+        .map(|db_type| AgentUpdateBlocker {
+            label: dbx_core::agent_catalog::label_for_key(&db_type).unwrap_or(&db_type).to_string(),
+            db_type,
+        })
+        .collect::<Vec<_>>();
+    blockers.sort_by(|left, right| left.label.cmp(&right.label));
+    blockers
 }

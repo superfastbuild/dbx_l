@@ -145,6 +145,9 @@ fn mysql_printable_binary_preview(bytes: &[u8]) -> Option<String> {
 }
 
 fn mysql_blob_preview(bytes: &[u8], label: &str) -> serde_json::Value {
+    if label == "BLOB" {
+        return super::binary_value_to_json(bytes);
+    }
     serde_json::Value::String(format!("({label}) {} bytes", bytes.len()))
 }
 
@@ -1400,10 +1403,7 @@ mod tests {
         let blob_column = mysql_test_column(ColumnType::MYSQL_TYPE_BLOB, 63, ColumnFlags::BLOB_FLAG, 65_535);
 
         assert_eq!(mysql_bytes_to_json(b"hello".to_vec(), &text_column), serde_json::json!("hello"));
-        assert_eq!(
-            mysql_bytes_to_json(vec![0x00, 0x01, 0xab, 0xff], &blob_column),
-            serde_json::json!("(BLOB) 4 bytes")
-        );
+        assert_eq!(mysql_bytes_to_json(vec![0x00, 0x01, 0xab, 0xff], &blob_column), serde_json::json!("0x0001abff"));
     }
 
     #[test]

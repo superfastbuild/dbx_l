@@ -74,6 +74,21 @@ export interface AgentDriverInfo {
   jre_installed: boolean;
 }
 
+export interface AgentDriverUpdateIssue {
+  db_type: string;
+  error: string;
+}
+
+export interface UpgradeAllAgentDriversResult {
+  upgraded: number;
+  failed: AgentDriverUpdateIssue[];
+}
+
+export interface AgentUpdateBlocker {
+  db_type: string;
+  label: string;
+}
+
 export type JavaRuntimeMode = "managed" | "system" | "custom";
 
 export interface JavaRuntimeConfig {
@@ -90,6 +105,7 @@ export interface DriverStoreUsage {
   total_bytes: number;
   jre_bytes: number;
   agent_driver_bytes: number;
+  download_cache_bytes?: number;
   jdbc_plugin_bytes: number;
   jdbc_driver_bytes: number;
   jres: DriverStoreUsageItem[];
@@ -847,8 +863,12 @@ export async function installAgent(dbType: string): Promise<void> {
   return invoke("install_agent", { dbType });
 }
 
-export async function upgradeAllAgents(): Promise<number> {
+export async function upgradeAllAgents(): Promise<UpgradeAllAgentDriversResult> {
   return invoke("upgrade_all_agents");
+}
+
+export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {
+  return invoke("check_agent_update_blockers", { dbTypes });
 }
 
 export async function uninstallAgent(dbType: string): Promise<void> {

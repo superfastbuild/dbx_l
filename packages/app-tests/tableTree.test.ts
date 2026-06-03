@@ -193,3 +193,26 @@ test("mergeTableInfosIntoObjects restores views missing from object metadata", (
     ],
   );
 });
+
+test("mergeTableInfosIntoObjects dedupes MySQL tables when object metadata carries database as schema", () => {
+  const merged = mergeTableInfosIntoObjects(
+    [
+      {
+        name: "orders",
+        object_type: "TABLE",
+        schema: "app",
+        comment: null,
+        created_at: null,
+        updated_at: null,
+        parent_schema: null,
+        parent_name: null,
+      },
+    ],
+    [table("orders")],
+  );
+
+  assert.deepEqual(
+    merged.map((item) => ({ name: item.name, type: item.object_type, schema: item.schema })),
+    [{ name: "orders", type: "TABLE", schema: "app" }],
+  );
+});

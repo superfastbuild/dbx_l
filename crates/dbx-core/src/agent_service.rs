@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,18 @@ pub struct AgentProgressEvent {
     pub current: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_drivers: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentDriverUpdateIssue {
+    pub db_type: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+pub struct UpgradeAllAgentDriversResult {
+    pub upgraded: u32,
+    pub failed: Vec<AgentDriverUpdateIssue>,
 }
 
 impl AgentProgressEvent {
@@ -163,14 +176,15 @@ pub async fn install_agent_driver(
 pub async fn upgrade_all_agent_drivers(
     am: &AgentManager,
     progress: impl Fn(AgentProgressEvent),
-) -> Result<u32, String> {
+) -> Result<UpgradeAllAgentDriversResult, String> {
     let registry = fetch_registry().await?;
     let agents = build_agent_list(am, Some(&registry));
     let updatable: Vec<&AgentDriverInfo> = agents.iter().filter(|agent| agent.update_available).collect();
     let total = updatable.len() as u32;
+    let mut result = UpgradeAllAgentDriversResult::default();
 
     for (index, agent) in updatable.iter().enumerate() {
-        install_agent_driver_from_registry(
+        match install_agent_driver_from_registry(
             am,
             &registry,
             &agent.db_type,
@@ -178,11 +192,18 @@ pub async fn upgrade_all_agent_drivers(
             Some((index + 1) as u32),
             Some(total),
         )
-        .await?;
+        .await
+        {
+            Ok(()) => result.upgraded += 1,
+            Err(error) => {
+                log::warn!("Failed to update {} agent driver: {}", agent.db_type, error);
+                result.failed.push(AgentDriverUpdateIssue { db_type: agent.db_type.clone(), error });
+            }
+        }
     }
 
     progress(AgentProgressEvent::step("all-done"));
-    Ok(total)
+    Ok(result)
 }
 
 pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<(), String> {
@@ -238,6 +259,7 @@ pub async fn reinstall_agent_jre(
         .ok_or_else(|| format!("No JRE {jre_key} available for platform: {platform}"))?;
     let jre_archive = am.base_dir().join("jre-download.tar.gz");
     download_with_progress(
+        am,
         &progress,
         "jre",
         &platform_jre.url,
@@ -338,6 +360,7 @@ async fn install_agent_driver_from_registry(
             total_drivers,
         ));
         download_with_progress(
+            am,
             progress,
             "jre",
             &platform_jre.url,
@@ -365,6 +388,7 @@ async fn install_agent_driver_from_registry(
         total_drivers,
     ));
     download_with_progress(
+        am,
         progress,
         "driver",
         &driver.jar.url,
@@ -396,6 +420,7 @@ async fn install_agent_driver_from_registry(
 }
 
 async fn download_with_progress(
+    am: &AgentManager,
     progress: &impl Fn(AgentProgressEvent),
     step: &str,
     url: &str,
@@ -410,6 +435,18 @@ async fn download_with_progress(
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let tmp = download_temp_path(dest);
+    let cache_path = cached_download_path(am, url, total_size, dest);
+    prune_download_cache(am).ok();
+    if cached_download_is_valid(am, &cache_path, total_size) {
+        std::fs::copy(&cache_path, &tmp).map_err(|err| format!("Failed to copy cached download: {err}"))?;
+        progress(AgentProgressEvent::transfer(step, total_size, total_size).with_batch(
+            db_type,
+            current,
+            total_drivers,
+        ));
+        return replace_download(&tmp, dest);
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
@@ -431,7 +468,60 @@ async fn download_with_progress(
     }
     std::io::Write::flush(&mut file).map_err(|err| format!("Failed to flush temp file: {err}"))?;
     drop(file);
+    if let Some(parent) = cache_path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            log::warn!("Failed to create agent download cache directory: {err}");
+        } else if let Err(err) = std::fs::copy(&tmp, &cache_path) {
+            log::warn!("Failed to cache agent download: {err}");
+        }
+    }
     replace_download(&tmp, dest)
+}
+
+fn cached_download_path(am: &AgentManager, url: &str, total_size: u64, dest: &std::path::Path) -> std::path::PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    total_size.hash(&mut hasher);
+    let hash = hasher.finish();
+    let file_name = dest.file_name().and_then(|name| name.to_str()).unwrap_or("download");
+    am.download_cache_dir().join(format!("{hash:016x}-{file_name}"))
+}
+
+fn cached_download_is_valid(am: &AgentManager, path: &std::path::Path, expected_size: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    if expected_size > 0 && meta.len() != expected_size {
+        let _ = std::fs::remove_file(path);
+        return false;
+    }
+    let max_age = std::time::Duration::from_secs(am.download_cache_max_age_days() * 24 * 60 * 60);
+    if meta.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > max_age) {
+        let _ = std::fs::remove_file(path);
+        return false;
+    }
+    true
+}
+
+fn prune_download_cache(am: &AgentManager) -> Result<(), String> {
+    let cache_dir = am.download_cache_dir();
+    let max_age = std::time::Duration::from_secs(am.download_cache_max_age_days() * 24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(&cache_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > max_age) {
+            let _ = if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+        }
+    }
+    Ok(())
 }
 
 pub fn github_url_to_r2_path(github_url: &str, category: &str) -> String {

@@ -103,6 +103,7 @@ const defaultForm = (): Omit<ConnectionConfig, "id"> => ({
   proxy_password: "",
   ssl: false,
   ca_cert_path: "",
+  sysdba: false,
   oracle_connection_type: "service_name",
   connection_string: undefined,
   jdbc_driver_class: undefined,
@@ -447,6 +448,7 @@ watch(
         proxy_password: config.proxy_password || "",
         ssl: config.ssl || false,
         ca_cert_path: config.ca_cert_path || "",
+        sysdba: config.sysdba || isOracleSysUser(config),
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
         jdbc_driver_class: config.jdbc_driver_class,
@@ -898,8 +900,10 @@ function connectionConfigForSubmit(id: string): ConnectionConfig {
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
   }
   if (config.db_type !== "oracle") {
+    config.sysdba = undefined;
     config.oracle_connection_type = undefined;
   } else {
+    config.sysdba = !!config.sysdba || isOracleSysUser(config);
     config.oracle_connection_type = config.oracle_connection_type || "service_name";
   }
   if (config.db_type !== "redis") {
@@ -1123,6 +1127,10 @@ function parseRedisEndpoint(value: string, defaultPort: number): { host: string;
   return { host: endpoint, port: defaultPort };
 }
 
+function isOracleSysUser(config: Pick<ConnectionConfig, "db_type" | "username">): boolean {
+  return config.db_type === "oracle" && config.username.trim().toLowerCase() === "sys";
+}
+
 function resetTestState() {
   testRunId += 1;
   isTesting.value = false;
@@ -1256,6 +1264,10 @@ watch(
     if (open.value && draft && !props.editConfig) applyConnectionPrefill(draft);
   },
 );
+
+watch([() => form.value.db_type, () => form.value.username], () => {
+  if (isOracleSysUser(form.value)) form.value.sysdba = true;
+});
 
 watch(canUseSsh, (value) => {
   if (!value && configTab.value === "ssh") {
@@ -2247,7 +2259,7 @@ function openExternalUrl(url: string) {
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right text-xs">SYSDBA</Label>
                     <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" v-model="form.sysdba" class="mr-0" />
+                      <input type="checkbox" v-model="form.sysdba" class="mr-0" :disabled="isOracleSysUser(form)" />
                       <span class="text-xs text-muted-foreground">as SYSDBA</span>
                     </label>
                   </div>
