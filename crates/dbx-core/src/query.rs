@@ -28,6 +28,24 @@ async fn connection_mysql_query_dialect(state: &AppState, connection_id: &str) -
         .unwrap_or_default()
 }
 
+async fn connection_database_type_for_pool_key(state: &AppState, pool_key: &str) -> Option<DatabaseType> {
+    let configs = state.configs.read().await;
+    configs
+        .iter()
+        .filter(|(connection_id, _)| {
+            pool_key.strip_prefix(connection_id.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        })
+        .max_by_key(|(connection_id, _)| connection_id.len())
+        .map(|(_, config)| config.db_type)
+}
+
+fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&str>) -> Option<&str> {
+    match db_type {
+        Some(DatabaseType::Iris) => None,
+        _ => schema,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct QueryExecutionOptions {
     pub max_rows: Option<usize>,
@@ -478,6 +496,7 @@ pub async fn do_execute(
         .get(pool_key)
         .map(|config| config.attached_databases.iter().map(|database| database.name.clone()).collect::<Vec<_>>())
         .unwrap_or_default();
+    let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
@@ -586,7 +605,7 @@ pub async fn do_execute(
             let client = client.clone();
             let sql = sql.to_string();
             let database = database.map(|s| s.to_string());
-            let schema = schema.map(|s| s.to_string());
+            let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
             let rpc_timeout = query_timeout;
             drop(connections);
@@ -1238,6 +1257,8 @@ async fn exec_tx_explicit_inner(
 ) -> Result<db::QueryResult, String> {
     let conns = state.connections.read().await;
     if let Some(crate::connection::PoolKind::Agent(client)) = conns.get(pool_key) {
+        let db_type = connection_database_type_for_pool_key(state, pool_key).await;
+        let schema = schema_for_execution_context(db_type, schema);
         let mut client = client.lock().await;
         let result: db::QueryResult = client.execute_transaction(database, statements, schema).await?;
         return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result });
@@ -1624,6 +1645,13 @@ mod tests {
         assert_eq!(params["maxRows"], 500);
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["timeoutSecs"], 600);
+    }
+
+    #[test]
+    fn iris_execution_context_omits_schema() {
+        assert_eq!(schema_for_execution_context(Some(DatabaseType::Iris), Some("SQLUser")), None);
+        assert_eq!(schema_for_execution_context(Some(DatabaseType::Oracle), Some("APP")), Some("APP"));
+        assert_eq!(schema_for_execution_context(None, Some("APP")), Some("APP"));
     }
 
     #[test]

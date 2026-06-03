@@ -173,6 +173,11 @@ final class DbxJdbcPluginTest {
               "connection_string": "jdbc:yasdb://172.26.128.159:20027/yasdb"
             }
             """);
+        JsonNode iris = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:IRIS://127.0.0.1:1972/USER"
+            }
+            """);
         JsonNode h2 = MAPPER.readTree("""
             {
               "connection_string": "jdbc:h2:mem:dbx_quirks"
@@ -181,6 +186,8 @@ final class DbxJdbcPluginTest {
 
         assertEquals(true, DbxJdbcPlugin.driverQuirks(yashan).skipExecutionContext());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(yashan).useOracleMetadata());
+        assertEquals(true, DbxJdbcPlugin.driverQuirks(iris).skipExecutionContext());
+        assertEquals(false, DbxJdbcPlugin.driverQuirks(iris).useOracleMetadata());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).skipExecutionContext());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).useOracleMetadata());
     }
