@@ -1200,8 +1200,8 @@ export async function redisScanKeys(connectionId: string, db: number, cursor: nu
   return post("/api/redis/scan-keys", { connectionId, db, cursor, pattern, count });
 }
 
-export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number): Promise<RedisScanResult> {
-  return post("/api/redis/scan-values", { connectionId, db, cursor, pattern, query, count });
+export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number, includeKeyMatches = false): Promise<RedisScanResult> {
+  return post("/api/redis/scan-values", { connectionId, db, cursor, pattern, query, includeKeyMatches, count });
 }
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {

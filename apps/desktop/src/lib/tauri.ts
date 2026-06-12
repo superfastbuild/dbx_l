@@ -1032,8 +1032,8 @@ export async function redisScanKeys(connectionId: string, db: number, cursor: nu
   return invoke("redis_scan_keys", { connectionId, db, cursor, pattern, count });
 }
 
-export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number): Promise<RedisScanResult> {
-  return invoke("redis_scan_values", { connectionId, db, cursor, pattern, query, count });
+export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number, includeKeyMatches = false): Promise<RedisScanResult> {
+  return invoke("redis_scan_values", { connectionId, db, cursor, pattern, query, includeKeyMatches, count });
 }
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {

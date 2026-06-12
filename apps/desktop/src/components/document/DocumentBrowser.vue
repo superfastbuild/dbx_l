@@ -365,6 +365,8 @@ const customSaveHandler = computed<CustomSaveHandler>(() => ({
 async function load() {
   loading.value = true;
   error.value = "";
+  const previousSelectedIdx = selectedIdx.value;
+  const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
     const filter = currentDocumentFilter();
     const sort = sortInput.value.trim() || undefined;
@@ -382,6 +384,7 @@ async function load() {
       lastGridColumns.value = [...keySet];
     }
     total.value = result.total;
+    syncSelectedDocumentAfterLoad(previousSelectedIdx, previousSelectedId);
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -412,6 +415,33 @@ function asRecord(value: unknown): JsonRecord {
     return value as JsonRecord;
   }
   return {};
+}
+
+function documentIdentity(doc: JsonRecord | undefined): string | null {
+  const id = doc?._id;
+  if (id === null || id === undefined) return null;
+  return typeof id === "object" ? JSON.stringify(id) : String(id);
+}
+
+function syncSelectedDocumentAfterLoad(previousSelectedIdx: number | null, previousSelectedId: string | null) {
+  if (isNew.value || previousSelectedIdx === null) return;
+  if (!documents.value.length) {
+    selectedIdx.value = null;
+    if (!isEditing.value) editJson.value = "";
+    return;
+  }
+
+  const nextIdx = previousSelectedId ? documents.value.findIndex((doc) => documentIdentity(doc) === previousSelectedId) : previousSelectedIdx < documents.value.length ? previousSelectedIdx : -1;
+  if (nextIdx < 0) {
+    selectedIdx.value = null;
+    if (!isEditing.value) editJson.value = "";
+    return;
+  }
+
+  selectedIdx.value = nextIdx;
+  if (!isEditing.value) {
+    editJson.value = JSON.stringify(documents.value[nextIdx], null, 2);
+  }
 }
 
 function selectDoc(idx: number) {

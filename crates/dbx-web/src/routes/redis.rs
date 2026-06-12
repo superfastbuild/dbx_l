@@ -46,6 +46,7 @@ pub struct RedisValueScanRequest {
     pub cursor: u64,
     pub pattern: String,
     pub query: String,
+    pub include_key_matches: Option<bool>,
     pub count: usize,
 }
 
@@ -192,6 +193,7 @@ pub async fn scan_values(
         req.cursor,
         &req.pattern,
         &req.query,
+        req.include_key_matches.unwrap_or(false),
         req.count,
     )
     .await

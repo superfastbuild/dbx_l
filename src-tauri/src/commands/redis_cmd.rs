@@ -34,9 +34,20 @@ pub async fn redis_scan_values(
     cursor: u64,
     pattern: String,
     query: String,
+    include_key_matches: Option<bool>,
     count: usize,
 ) -> Result<RedisScanResult, String> {
-    dbx_core::redis_ops::redis_scan_values_core(&state, &connection_id, db, cursor, &pattern, &query, count).await
+    dbx_core::redis_ops::redis_scan_values_core(
+        &state,
+        &connection_id,
+        db,
+        cursor,
+        &pattern,
+        &query,
+        include_key_matches.unwrap_or(false),
+        count,
+    )
+    .await
 }
 
 #[tauri::command]

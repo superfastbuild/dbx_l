@@ -1,4 +1,4 @@
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export const CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS = 2_000;
 export const MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS = 30_000;

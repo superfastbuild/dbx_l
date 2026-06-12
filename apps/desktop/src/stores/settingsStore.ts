@@ -420,6 +420,7 @@ function normalizeCustomColumnFormatters(value: unknown): Record<string, CustomC
 
 function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnippet[] {
   if (!Array.isArray(value)) return existing ?? DEFAULT_SQL_SNIPPETS;
+  if (value.length === 0) return [];
   const valid: SqlSnippet[] = [];
   const seenPrefixes = new Set<string>();
   for (const item of value) {
