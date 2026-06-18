@@ -8,7 +8,7 @@ use crate::db;
 use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
-use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 #[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
@@ -1851,7 +1851,13 @@ pub async fn execute_on_pool_with_max_rows(
             let client = client.clone();
             drop(connections);
             let mut client = client.lock().await;
-            db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await
+            let result = db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await;
+            drop(client);
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(Some(DatabaseType::SqlServer), err))
+            {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::Agent(client) => {
             let client = client.clone();

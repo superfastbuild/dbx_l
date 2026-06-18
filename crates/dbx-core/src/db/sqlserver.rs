@@ -13,6 +13,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 pub type SqlServerClient = Client<Compat<TcpStream>>;
+pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
 const SIMPLE_QUERY_MODULE_KEYWORDS: &[&str] = &["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -175,11 +176,15 @@ where
 {
     match AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result.map_err(|e| e.to_string()),
-        Err(_) => {
-            Err("SQL Server driver could not decode this result set. Unsupported columns may need to be cast to text."
-                .to_string())
-        }
+        Err(_) => Err(format!(
+            "{SQLSERVER_DRIVER_PANIC_ERROR_PREFIX} the current client will be rebuilt. \
+                 Unsupported columns may need to be cast to text."
+        )),
     }
+}
+
+pub fn is_driver_panic_error(error: &str) -> bool {
+    error.starts_with(SQLSERVER_DRIVER_PANIC_ERROR_PREFIX)
 }
 
 async fn describe_sqlserver_result_set(

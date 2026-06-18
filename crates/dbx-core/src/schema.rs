@@ -1,7 +1,7 @@
 use crate::connection::{connection_url_for_endpoint, database_connection_config, AppState, MysqlMode, PoolKind};
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -2019,10 +2019,15 @@ pub async fn get_object_source_core(
         if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
             drop(connections);
             let mut client = client.lock().await;
-            first_string_cell(
+            let result =
                 db::sqlserver::execute_query(&mut client, &sqlserver_object_source_sql(schema, name, &object_type))
-                    .await?,
-            )?
+                    .await;
+            drop(client);
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(Some(DatabaseType::SqlServer), err))
+            {
+                state.remove_pool_by_key(&pool_key).await;
+            }
+            first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             drop(connections);
             if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle)
