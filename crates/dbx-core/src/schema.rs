@@ -1099,7 +1099,10 @@ mod tests {
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
     };
     #[cfg(feature = "duckdb-bundled")]
-    use super::{duckdb_attach_database, duckdb_list_databases, duckdb_query_tables_in_database};
+    use super::{
+        duckdb_attach_database, duckdb_completion_assistant_search, duckdb_list_databases,
+        duckdb_query_tables_in_database,
+    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
 
     fn test_column(name: &str, comment: Option<&str>, is_primary_key: bool) -> super::db::ColumnInfo {
