@@ -308,6 +308,11 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     // the statement should still target that statement, while the returned
     // execution range remains tight around the SQL text itself.
     if (pos >= statement.hitFrom && pos < statement.from && sql.slice(pos, statement.from).trim() === "") {
+      const previous = statements[index - 1];
+      if (previous && isCursorInSameLineDelimiterGap(sql, previous.to, pos)) {
+        const previousSoftRanges = splitStatementRangeAtSoftStarts(sql, previous, databaseType);
+        return rangeForCursorInSoftRanges(sql, previousSoftRanges, pos) ?? rangeFor(previous, sql);
+      }
       return rangeForCursorInSoftRanges(sql, softRanges, pos) ?? rangeFor(statement, sql);
     }
 
@@ -318,6 +323,15 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
   }
 
   return null;
+}
+
+function isCursorInSameLineDelimiterGap(sql: string, previousStatementEnd: number, cursorPos: number): boolean {
+  if (cursorPos <= previousStatementEnd) return false;
+  const between = sql.slice(previousStatementEnd, cursorPos);
+  const delimiterIndex = between.lastIndexOf(";");
+  if (delimiterIndex === -1) return false;
+  const afterDelimiter = between.slice(delimiterIndex + 1);
+  return !afterDelimiter.includes("\n") && between.slice(0, delimiterIndex).trim() === "" && afterDelimiter.trim() === "";
 }
 
 function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: number): SqlTextRange | null {
