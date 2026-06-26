@@ -1520,7 +1520,9 @@ pub async fn execute_query_with_max_rows(
             Ok(None) | Err(_) => sql.to_string(),
         };
         let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
-        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await
+        let mut result = sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await?;
+        strip_dbx_sqlserver_row_number_column(&mut result, sql);
+        Ok(result)
     } else if requires_simple_query_batch(sql) || is_transaction_control(sql) {
         let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
         let _ = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
@@ -1579,13 +1581,19 @@ pub async fn execute_batch_with_max_rows(
     if is_single_sqlserver_select(sql) {
         if let Ok(Some(query_sql)) = spatial_safe_sqlserver_query(client, sql).await {
             let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
-            return sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows))
-                .await
-                .map(|result| vec![result]);
+            return sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await.map(
+                |mut result| {
+                    strip_dbx_sqlserver_row_number_column(&mut result, sql);
+                    vec![result]
+                },
+            );
         }
     }
     let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
     let mut results = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
+    for result in &mut results {
+        strip_dbx_sqlserver_row_number_column(result, sql);
+    }
 
     if results.is_empty() {
         results.push(QueryResult {
@@ -1602,6 +1610,35 @@ pub async fn execute_batch_with_max_rows(
     }
 
     Ok(results)
+}
+
+fn strip_dbx_sqlserver_row_number_column(result: &mut QueryResult, sql: &str) {
+    if !is_dbx_sqlserver_row_number_page_sql(sql) {
+        return;
+    }
+    if !result.columns.last().is_some_and(|column| column.eq_ignore_ascii_case("__dbx_row_num")) {
+        return;
+    }
+
+    result.columns.pop();
+    if result.column_types.len() > result.columns.len() {
+        result.column_types.pop();
+    }
+    if result.column_sortables.len() > result.columns.len() {
+        result.column_sortables.pop();
+    }
+    for row in &mut result.rows {
+        if row.len() > result.columns.len() {
+            row.pop();
+        }
+    }
+}
+
+fn is_dbx_sqlserver_row_number_page_sql(sql: &str) -> bool {
+    let normalized = sql.to_ascii_uppercase();
+    normalized.contains("ROW_NUMBER() OVER")
+        && normalized.contains("[__DBX_ROW_NUM]")
+        && normalized.contains("DBX_PAGE_SOURCE.*")
 }
 
 fn sqlserver_batch_can_use_execute(sql: &str) -> bool {
@@ -1705,9 +1742,12 @@ mod tests {
         sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
         sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names,
         sqlserver_indexes_sql, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
-        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, SqlServerDescribedColumn, SqlServerResultSet,
+        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerResultSet,
     };
-    use crate::types::{CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest};
+    use crate::types::{
+        CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
+    };
     use chrono::NaiveDate;
     use std::time::Instant;
     use tiberius::{ColumnData, IntoSql};
@@ -2060,6 +2100,28 @@ mod tests {
             ColumnData::Binary(Some(std::borrow::Cow::Owned(vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xCF, 0x53])));
 
         assert_eq!(sqlserver_cell_to_json(&cell), serde_json::json!("0x000000000001cf53"));
+    }
+
+    #[test]
+    fn sqlserver_strips_generated_row_number_pagination_column() {
+        let sql = "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [__dbx_row_num] FROM (SELECT id FROM users) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];";
+        let mut result = QueryResult {
+            columns: vec!["id".to_string(), "__dbx_row_num".to_string()],
+            column_types: vec!["int".to_string(), "bigint".to_string()],
+            column_sortables: vec![],
+            rows: vec![vec![serde_json::json!(42), serde_json::json!(101)]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+
+        strip_dbx_sqlserver_row_number_column(&mut result, sql);
+
+        assert_eq!(result.columns, vec!["id"]);
+        assert_eq!(result.column_types, vec!["int"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(42)]]);
     }
 
     #[test]
