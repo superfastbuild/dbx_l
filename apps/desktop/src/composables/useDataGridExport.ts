@@ -49,6 +49,7 @@ export interface UseDataGridExportOptions {
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" }) => Promise<QueryResultExportRequest | undefined>;
   allExportResults?: ComputedRef<Array<{ sheetName: string; result: QueryResult }> | undefined>;
+  exportFileBaseName?: ComputedRef<string | undefined>;
   exportProgressDialog?: Ref<boolean>;
   exportProgressState?: Ref<{
     title: string;
@@ -116,6 +117,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     fullExportResult,
     queryResultExportRequest,
     allExportResults,
+    exportFileBaseName,
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
@@ -516,7 +518,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: result.rows.length,
           };
         }
-        let outputPath = "export.csv";
+        let outputPath = exportFileName("export", "csv");
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -555,7 +557,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageCsv() {
     await runExclusiveExport(async () => {
       try {
-        let outputPath = "export-page.csv";
+        let outputPath = exportFileName("export-page", "csv", { page: true });
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -579,7 +581,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       try {
         if (await exportFullTableDataViaBackend("json", rowIds)) return;
 
-        let outputPath = "export.json";
+        let outputPath = exportFileName("export", "json");
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -601,7 +603,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageJson() {
     await runExclusiveExport(async () => {
       try {
-        let outputPath = "export-page.json";
+        let outputPath = exportFileName("export-page", "json", { page: true });
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -625,7 +627,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       try {
         if (await exportFullTableDataViaBackend("markdown", rowIds)) return;
 
-        let outputPath = "export.md";
+        let outputPath = exportFileName("export", "md");
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -647,7 +649,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageMarkdown() {
     await runExclusiveExport(async () => {
       try {
-        let outputPath = "export-page.md";
+        let outputPath = exportFileName("export-page", "md", { page: true });
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -672,7 +674,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (await exportQueryResultViaBackend("xlsx", rowIds)) return;
         if (await exportFullTableDataViaBackend("xlsx", rowIds)) return;
 
-        let outputPath = "export.xlsx";
+        let outputPath = exportFileName("export", "xlsx");
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -739,7 +741,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageXlsx() {
     await runExclusiveExport(async () => {
       try {
-        let outputPath = "export-page.xlsx";
+        let outputPath = exportFileName("export-page", "xlsx", { page: true });
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -764,7 +766,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const sheets = (allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
         if (sheets.length === 0) return;
 
-        let outputPath = "query-results.xlsx";
+        let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
         if (isTauriRuntime()) {
           const { save } = await import("@tauri-apps/plugin-dialog");
           const path = await save({
@@ -798,7 +800,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     const extension = format === "markdown" ? "md" : format;
     const filterName = format === "csv" ? "CSV" : format === "xlsx" ? "Excel" : format === "json" ? "JSON" : format === "markdown" ? "Markdown" : "SQL";
-    let outputPath = `${meta.tableName || "export"}.${extension}`;
+    let outputPath = exportFileName(meta.tableName || "export", extension, { preferFallback: true });
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
@@ -877,7 +879,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     const extension = format;
     const filterName = format === "csv" ? "CSV" : "Excel";
-    let outputPath = `query-result.${extension}`;
+    let outputPath = exportFileName("query-result", extension);
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
@@ -946,7 +948,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           columnTypes: exportData.columnTypes,
           rows: exportData.rows,
         });
-        await saveTextFile(content, `${tableMeta.value?.tableName || "export"}.sql`, "SQL", "sql");
+        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql");
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
@@ -967,7 +969,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           columnTypes: exportData.columnTypes,
           rows: exportData.rows,
         });
-        await saveTextFile(content, "export-page.sql", "SQL", "sql");
+        await saveTextFile(content, exportFileName("export-page", "sql", { page: true }), "SQL", "sql");
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
@@ -992,6 +994,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       columnTypes: tableMeta.value ? columnIndexes.map((item) => columnTypes.value?.[item.index]) : undefined,
       rows: result.rows.map((row) => columnIndexes.map((item) => row[item.index] ?? null)),
     };
+  }
+
+  function exportFileName(fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean; preferFallback?: boolean } = {}): string {
+    const rawBaseName = options.preferFallback ? fallbackBaseName : exportFileBaseName?.value || fallbackBaseName;
+    return defaultDataGridExportFileName(rawBaseName, fallbackBaseName, extension, options);
   }
 
   return {
@@ -1051,6 +1058,41 @@ async function saveTextFile(content: string, defaultFileName: string, filterName
   a.download = defaultFileName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {
+  const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
+  const suffix = options.allResults ? "results" : options.page ? "page" : "";
+  return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
+}
+
+function sanitizeExportBaseName(value: string): string {
+  return replaceControlCharacters(
+    value
+      .trim()
+      .replace(/\.[sS][qQ][lL]$/, "")
+      .replace(/[<>:"/\\|?*]/g, "_"),
+    "_",
+  )
+    .replace(/\s+/g, " ")
+    .replace(/[._\s-]+$/g, "")
+    .slice(0, 120);
+}
+
+function replaceControlCharacters(value: string, replacement: string): string {
+  return Array.from(value)
+    .map((char) => (char.charCodeAt(0) < 32 ? replacement : char))
+    .join("");
+}
+
+function compactLocalTimestamp(date = new Date()): string {
+  const yy = String(date.getFullYear() % 100).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `${yy}${month}${day}${hour}${minute}${second}`;
 }
 
 function effectiveColumns(sourceColumns: Array<string | undefined> | undefined, columns: string[]): Array<string | undefined> {
