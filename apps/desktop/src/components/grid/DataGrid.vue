@@ -7326,7 +7326,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck="false"
-                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where flex-1 h-5 min-w-0 text-xs bg-transparent outline-none"
+                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where flex-1 h-6 min-w-0 bg-transparent outline-none"
                     :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
                     placeholder="WHERE"
                     @input="onWhereFilterInput"
@@ -7338,7 +7338,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showWhereHistorySuggestions">
                     <ChevronDown class="w-3 h-3" />
                   </button>
-                  <span ref="whereMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
+                  <span ref="whereMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- WHERE suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="whereSuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
@@ -7389,7 +7389,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck="false"
-                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order flex-1 h-5 min-w-0 text-xs bg-transparent outline-none"
+                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order flex-1 h-6 min-w-0 bg-transparent outline-none"
                     :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
                     placeholder="ORDER BY"
                     @keydown="onOrderByKeydown"
@@ -7400,7 +7400,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showOrderByHistorySuggestions">
                     <ChevronDown class="w-3 h-3" />
                   </button>
-                  <span ref="orderByMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
+                  <span ref="orderByMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- ORDER BY suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="orderBySuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
@@ -9339,6 +9339,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   max-width: 0;
   opacity: 0;
   transform: translateX(-4px);
+}
+
+.data-grid-topbar-condition-input,
+.data-grid-topbar-condition-measure {
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
 }
 
 .data-grid-topbar-condition-input::placeholder {
