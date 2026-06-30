@@ -1756,6 +1756,10 @@ export async function mongoAggregateDocuments(connectionId: string, database: st
   return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
 }
 
+export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {
+  return post("/api/mongo/create-index", { connectionId, database, collection, keysJson, optionsJson });
+}
+
 export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
   return post("/api/mongo/insert-document", { connectionId, database, collection, docJson });
 }

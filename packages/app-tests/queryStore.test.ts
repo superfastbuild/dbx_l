@@ -1842,6 +1842,59 @@ test("mongo aggregate execution uses editor page size when pagination plan has n
   }
 });
 
+test("mongo createIndex execution uses the dedicated create-index endpoint", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let createIndexBody: any;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/mongo/create-index") {
+      createIndexBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ name: "users_email_unique" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, 'db.users.createIndex({email: 1}, {unique: true, name: "users_email_unique"})');
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(createIndexBody, {
+      connectionId: "mongo-1",
+      database: "accounting",
+      collection: "users",
+      keysJson: '{"email": 1}',
+      optionsJson: '{"unique": true, "name": "users_email_unique"}',
+    });
+    assert.deepEqual(tab?.result?.columns, ["name"]);
+    assert.deepEqual(tab?.result?.rows, [["users_email_unique"]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("table data export fetches every filtered page", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

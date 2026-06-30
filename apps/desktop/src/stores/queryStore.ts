@@ -12,6 +12,7 @@ import { restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersisten
 import {
   evaluateMongoAggregateSafety,
   mongoCountToQueryResult,
+  mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
   mongoIndexesToQueryResult,
   mongoUseToQueryResult,
@@ -1756,6 +1757,29 @@ export const useQueryStore = defineStore("query", () => {
         } else if (mongoWrite.kind === "update") {
           const result = await api.mongoUpdateDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.update, mongoWrite.many);
           affectedRows = result.affected_rows;
+        } else if (mongoWrite.kind === "createIndex") {
+          const result = await api.mongoCreateIndex(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.keys, mongoWrite.options);
+          console.info("[DBX][executeTabSql:mongo-write:done]", {
+            traceId,
+            indexName: result.name,
+            elapsed: elapsed(),
+          });
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.executionId === executionId) {
+            current.results = undefined;
+            current.activeResultIndex = undefined;
+            current.result = markQueryResultRowsRaw(mongoCreateIndexToQueryResult(result.name, performance.now() - startedAt));
+            touchResult(current);
+            current.queryAnalysis = undefined;
+            current.querySourceColumns = undefined;
+            current.queryEditabilityReason = undefined;
+            current.mongoEditTarget = undefined;
+            current.tableMeta = undefined;
+            current.resultBaseSql = options?.resultBaseSql ?? sql;
+            current.resultSortedSql = options?.resultSortedSql;
+            syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          }
+          return;
         } else {
           const result = await api.mongoDeleteDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.many);
           affectedRows = result.affected_rows;

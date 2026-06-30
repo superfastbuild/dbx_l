@@ -176,6 +176,28 @@ pub async fn mongo_aggregate_documents(
 }
 
 #[tauri::command]
+pub async fn mongo_create_index(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    keys_json: String,
+    options_json: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ensure_connection_writable(&state, &connection_id, "Create index").await?;
+    let name = dbx_core::mongo_ops::mongo_create_index_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &keys_json,
+        options_json.as_deref(),
+    )
+    .await?;
+    Ok(serde_json::json!({ "name": name }))
+}
+
+#[tauri::command]
 pub async fn mongo_insert_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

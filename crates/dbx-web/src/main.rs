@@ -448,6 +448,7 @@ async fn main() {
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/server-version", post(routes::mongo::server_version))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
+        .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))
         .route("/mongo/update-document", post(routes::mongo::update_document))

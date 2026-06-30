@@ -99,6 +99,16 @@ pub struct MongoAggregateRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoCreateIndexRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub keys_json: String,
+    pub options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoInsertRequest {
     pub connection_id: String,
     pub database: String,
@@ -284,6 +294,24 @@ pub async fn aggregate_documents(
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn create_index(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MongoCreateIndexRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Create index").await?;
+    let name = dbx_core::mongo_ops::mongo_create_index_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        &req.keys_json,
+        req.options_json.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::json!({ "name": name })))
 }
 
 pub async fn insert_document(

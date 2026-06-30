@@ -850,6 +850,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_aggregate_documents,
+            commands::mongo_cmd::mongo_create_index,
             commands::mongo_cmd::mongo_insert_document,
             commands::mongo_cmd::mongo_insert_documents,
             commands::mongo_cmd::mongo_update_document,
