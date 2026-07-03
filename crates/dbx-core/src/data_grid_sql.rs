@@ -1029,6 +1029,13 @@ pub fn format_grid_sql_literal(
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    if is_mysql_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_mysql_binary_literal_text(&text) {
+            // DBX result values expose binary columns as prefixed hex; keep them
+            // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
     if column_info.map(|column| is_numeric_type(&column.data_type)).unwrap_or(false) && is_numeric_literal(&text) {
         // BigDecimal/BigInteger cells cross JSON-RPC as strings so browsers cannot round them.
         return text;
@@ -1231,6 +1238,30 @@ fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bo
                 | DatabaseType::Sundb
         )
     )
+}
+
+fn is_mysql_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::Mysql)
+        && column_info.map(|column| is_mysql_binary_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_mysql_binary_column_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
+}
+
+fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x")?;
+    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(if hex.is_empty() { "X''".to_string() } else { trimmed.to_string() })
+    } else {
+        None
+    }
 }
 
 fn is_geometry_column_type(data_type: &str) -> bool {
@@ -2024,6 +2055,66 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
+        );
+    }
+
+    #[test]
+    fn mysql_copy_statements_preserve_blob_hex_literals() {
+        let table_meta = DataGridTableMeta {
+            schema: None,
+            table_name: "reports".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![column("id", "int", false, None), column("payload", "MEDIUMBLOB", true, None)]),
+        };
+        let columns = vec!["id".to_string(), "payload".to_string()];
+        let rows = vec![vec![json!(1), json!("0x0001abff")], vec![json!(2), json!("0x")]];
+
+        let insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: Some(table_meta.clone()),
+            columns: columns.clone(),
+            source_columns: None,
+            rows: rows.clone(),
+            exclude_primary_keys: false,
+        });
+        assert_eq!(
+            insert.as_deref(),
+            Some("INSERT INTO `reports` (`id`, `payload`) VALUES\n(1, 0x0001abff),\n(2, X'');")
+        );
+
+        let updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta,
+            columns,
+            source_columns: None,
+            rows,
+        });
+        assert_eq!(
+            updates,
+            vec![
+                "UPDATE `reports` SET `payload` = 0x0001abff WHERE `id` = 1;",
+                "UPDATE `reports` SET `payload` = X'' WHERE `id` = 2;"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_text_columns_keep_prefixed_hex_strings_quoted() {
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x0001abff"),
+                Some(DatabaseType::Mysql),
+                Some(&column("note", "varchar(64)", true, None)),
+            ),
+            "'0x0001abff'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0xnothex"),
+                Some(DatabaseType::Mysql),
+                Some(&column("payload", "blob", true, None)),
+            ),
+            "'0xnothex'"
         );
     }
 
