@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -78,7 +79,7 @@ func TestMissingTableReadSessionMethodsReturnEmptyOrFalse(t *testing.T) {
 	if err := json.Unmarshal(data, &page); err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Columns) != 0 || len(page.Rows) != 0 || page.HasMore || page.SessionID != nil {
+	if len(page.Columns) != 0 || len(page.ColumnTypes) != 0 || len(page.Rows) != 0 || page.HasMore || page.SessionID != nil {
 		t.Fatalf("missing table read session should return empty page, got %+v", page)
 	}
 
@@ -100,8 +101,11 @@ func TestEmptyResultSlicesMarshalAsArrays(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	if strings.Contains(text, `"columns":null`) || strings.Contains(text, `"rows":null`) {
+	if strings.Contains(text, `"columns":null`) || strings.Contains(text, `"column_types":null`) || strings.Contains(text, `"rows":null`) {
 		t.Fatalf("query result should marshal nil slices as arrays: %s", text)
+	}
+	if !strings.Contains(text, `"column_types":[]`) {
+		t.Fatalf("query result should marshal empty column types array: %s", text)
 	}
 
 	data, err = json.Marshal(indexInfo{})
@@ -266,6 +270,66 @@ func TestBuildDSNUsesConnectionStringWhenProvided(t *testing.T) {
 
 	if dsn != "oracle://scott:tiger@db.example.com:1521/ORCLPDB1" {
 		t.Fatalf("unexpected dsn: %s", dsn)
+	}
+}
+
+func TestBuildDSNEncodesColonInCredentials(t *testing.T) {
+	dsn := buildDSN(connectParams{
+		Host:     "db.example.com",
+		Port:     1521,
+		Database: "XE",
+		Username: "9008888:reader",
+		Password: "dbx:pass",
+	})
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, _ := parsed.User.Password()
+	if parsed.User.Username() != `"9008888:reader"` || password != "dbx:pass" {
+		t.Fatalf("credentials should survive URL parsing, dsn=%s username=%q password=%q", dsn, parsed.User.Username(), password)
+	}
+	if !strings.HasPrefix(parsed.User.String(), "%229008888%3Areader%22:") {
+		t.Fatalf("Oracle auth username should be quoted and escaped for non-regular identifiers, dsn=%s", dsn)
+	}
+}
+
+func TestBuildDSNEncodesColonInCredentialsFromJDBCServiceURL(t *testing.T) {
+	dsn := buildDSN(connectParams{
+		Username:         "9008888:reader",
+		Password:         "dbx:pass",
+		ConnectionString: "jdbc:oracle:thin:@//db.example.com:1521/XE",
+	})
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, _ := parsed.User.Password()
+	if parsed.User.Username() != `"9008888:reader"` || password != "dbx:pass" {
+		t.Fatalf("credentials should survive JDBC URL conversion, dsn=%s username=%q password=%q", dsn, parsed.User.Username(), password)
+	}
+	if parsed.Host != "db.example.com:1521" || strings.TrimPrefix(parsed.Path, "/") != "XE" {
+		t.Fatalf("JDBC host/service should survive conversion, dsn=%s", dsn)
+	}
+}
+
+func TestOracleAuthUsernameQuotesOnlyNonRegularIdentifiers(t *testing.T) {
+	tests := map[string]string{
+		"scott":          "scott",
+		"test":           "test",
+		"SCOTT_1":        "SCOTT_1",
+		"9008888:reader": `"9008888:reader"`,
+		"abc:def":        `"abc:def"`,
+		`"abc:def"`:      `"abc:def"`,
+		`abc"def`:        `"abc""def"`,
+	}
+
+	for input, want := range tests {
+		if got := oracleAuthUsername(input); got != want {
+			t.Fatalf("oracleAuthUsername(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

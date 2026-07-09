@@ -440,6 +440,7 @@ export const checkForUpdates = forward("checkForUpdates");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadAndInstallUpdate = forward("downloadAndInstallUpdate");
 export const getAppVersion = forward("getAppVersion");
+export const getAppSupportInfo = forward("getAppSupportInfo");
 
 // Layout
 export const saveSidebarLayout = forward("saveSidebarLayout");
@@ -450,6 +451,7 @@ export const loadSidebarLayout = forward("loadSidebarLayout");
 // ---------------------------------------------------------------------------
 
 export type {
+  AppSupportInfo,
   AiMessage,
   AiCompletionRequest,
   AiTaskContract,

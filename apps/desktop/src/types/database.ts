@@ -732,15 +732,33 @@ export interface QueryTab {
   tableMetaUpdatedAt?: number;
   tableInfoTab?: TableInfoTab;
   queryAnalysis?: {
+    catalog?: string;
+    catalogQuoted?: boolean;
     schema?: string;
     schemaQuoted?: boolean;
     tableName: string;
     tableNameQuoted?: boolean;
     tableAlias?: string;
     selectStar: boolean;
+    editableSourceKey?: string;
+    multiSource?: boolean;
+    allowInsertDelete?: boolean;
+    sources?: {
+      key: string;
+      catalog?: string;
+      catalogQuoted?: boolean;
+      schema?: string;
+      schemaQuoted?: boolean;
+      tableName: string;
+      tableNameQuoted?: boolean;
+      alias?: string;
+    }[];
     columns: {
       sourceName?: string;
       sourceNameQuoted?: boolean;
+      sourceQualifier?: string;
+      sourceKey?: string;
+      star?: boolean;
       resultName: string;
       expression: string;
     }[];

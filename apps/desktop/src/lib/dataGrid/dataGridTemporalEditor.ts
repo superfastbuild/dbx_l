@@ -36,11 +36,11 @@ export function parseTemporalInputValue(value: string, kind: TemporalCellEditorK
   const text = value.trim();
   if (!text) return null;
   if (kind === "date") return text;
-  if (kind === "time") return normalizeTimeInput(text) || null;
+  if (kind === "time") return normalizeTimeInput(text) || text;
 
-  const [date, time = ""] = text.split("T");
-  const normalizedTime = normalizeTimeInput(time);
-  return date && normalizedTime ? `${date} ${normalizedTime}` : text.replace("T", " ");
+  const datetime = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2}))?$/);
+  if (!datetime) return text;
+  return `${datetime[1]} ${datetime[2]}:${datetime[3] ?? "00"}`;
 }
 
 export type TemporalCellEditorPart = "year" | "month" | "day" | "hour" | "minute" | "second";

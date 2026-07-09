@@ -122,6 +122,7 @@ import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
+import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGrid/dataGridColumnFilter";
@@ -231,6 +232,9 @@ const props = defineProps<{
   allExportResults?: Array<{ sheetName: string; result: QueryResult }>;
   exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
+  queryEditabilityReason?: QueryEditabilityReason;
+  allowInsertRows?: boolean;
+  allowDeleteRows?: boolean;
 }>();
 
 const dataGridTraceId = uuid().slice(0, 8);
@@ -2459,13 +2463,17 @@ const gridVerticalScrollbarThumbHeightPercent = ref(100);
 const gridHorizontalScrollbarDragging = ref(false);
 const gridVerticalScrollbarDragging = ref(false);
 let gridHorizontalScrollbarFrame = 0;
+let gridHorizontalScrollbarDragFrame = 0;
+let gridHorizontalScrollbarPendingClientX = 0;
 let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
 let resetCellEditTextareaScrollOnResize = false;
 let gridHorizontalScrollbarDragState: {
+  scroller: HTMLElement;
   trackRect: DOMRect;
   thumbOffsetPx: number;
+  maxScrollLeft: number;
 } | null = null;
 let gridVerticalScrollbarDragState: {
   trackRect: DOMRect;
@@ -2791,33 +2799,47 @@ function observeDataGridTopbarWidth() {
   }
 }
 
-function applyGridHorizontalScrollbarDrag(clientX: number) {
-  const scroller = gridScrollerElement();
+function applyPendingGridHorizontalScrollbarDrag() {
+  gridHorizontalScrollbarDragFrame = 0;
   const dragState = gridHorizontalScrollbarDragState;
-  if (!scroller || !dragState) return;
-
-  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  if (maxScrollLeft <= 1) return;
+  if (!dragState) return;
 
   const thumbWidthPx = dragState.trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
   const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
-  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
-  scroller.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * maxScrollLeft;
+  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, gridHorizontalScrollbarPendingClientX - dragState.trackRect.left - dragState.thumbOffsetPx));
+  const scroller = dragState.scroller;
+  const nextScrollLeft = (thumbLeftPx / maxThumbLeftPx) * dragState.maxScrollLeft;
+  if (Math.abs(scroller.scrollLeft - nextScrollLeft) < 0.5) return;
+  scroller.scrollLeft = nextScrollLeft;
   updateGridHorizontalViewport(scroller);
   if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
   if (useCanvasGridRows.value) {
-    syncCanvasViewport();
+    drawCanvasGridNow();
   }
+}
+
+function scheduleGridHorizontalScrollbarDrag(clientX: number) {
+  gridHorizontalScrollbarPendingClientX = clientX;
+  if (gridHorizontalScrollbarDragFrame) return;
+  // Pointermove can fire faster than paint; keep expensive canvas/layout work to one frame.
+  gridHorizontalScrollbarDragFrame = requestAnimationFrame(applyPendingGridHorizontalScrollbarDrag);
+}
+
+function flushGridHorizontalScrollbarDrag() {
+  if (!gridHorizontalScrollbarDragFrame) return;
+  cancelAnimationFrame(gridHorizontalScrollbarDragFrame);
+  applyPendingGridHorizontalScrollbarDrag();
 }
 
 function onGridHorizontalScrollbarPointerMove(event: PointerEvent) {
   if (!gridHorizontalScrollbarDragState) return;
   event.preventDefault();
-  applyGridHorizontalScrollbarDrag(event.clientX);
+  scheduleGridHorizontalScrollbarDrag(event.clientX);
 }
 
 function stopGridHorizontalScrollbarDrag() {
   if (!gridHorizontalScrollbarDragState) return;
+  flushGridHorizontalScrollbarDrag();
   gridHorizontalScrollbarDragState = null;
   gridHorizontalScrollbarDragging.value = false;
   window.removeEventListener("pointermove", onGridHorizontalScrollbarPointerMove, true);
@@ -2841,6 +2863,8 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   const track = gridHorizontalScrollbarTrackRef.value;
   if (!scroller || !track || !hasGridHorizontalOverflow.value) return;
 
+  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  if (maxScrollLeft <= 1) return;
   const trackRect = track.getBoundingClientRect();
   const thumbLeftPx = trackRect.width * (gridHorizontalScrollbarThumbLeftPercent.value / 100);
   const thumbWidthPx = trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
@@ -2848,8 +2872,10 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   const pointerInsideThumb = pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx;
 
   gridHorizontalScrollbarDragState = {
+    scroller,
     trackRect,
     thumbOffsetPx: pointerInsideThumb ? pointerX - thumbLeftPx : thumbWidthPx / 2,
+    maxScrollLeft,
   };
   gridHorizontalScrollbarDragging.value = true;
   document.body.style.userSelect = "none";
@@ -2857,7 +2883,7 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   window.addEventListener("pointerup", stopGridHorizontalScrollbarDrag, true);
   window.addEventListener("pointercancel", stopGridHorizontalScrollbarDrag, true);
   event.preventDefault();
-  applyGridHorizontalScrollbarDrag(event.clientX);
+  scheduleGridHorizontalScrollbarDrag(event.clientX);
 }
 
 function applyGridVerticalScrollbarDrag(clientY: number) {
@@ -3482,6 +3508,8 @@ watch(
 );
 const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && (!!props.tableMeta || !!props.customSaveHandler));
 const queryEditReadyTargetLabel = computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel ?? "");
+const showQueryEditReadOnlyBadge = computed(() => isResultsContext.value && hasData.value && !showQueryEditReadyBadge.value && !!props.queryEditabilityReason);
+const queryEditReadOnlyReason = computed(() => (props.queryEditabilityReason ? t(`grid.queryEditUnsupported.${props.queryEditabilityReason}`) : ""));
 const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && canUseKeylessRowPredicate(props.databaseType, props.tableMeta.primaryKeys ?? []));
 const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsContext.value);
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
@@ -3492,12 +3520,13 @@ const canEditExistingRows = computed(() => !!props.customSaveHandler || canEditE
 const customReadonlyColumns = computed(() => new Set((props.customSaveHandler?.readonlyColumns ?? []).map((column) => column.toLowerCase())));
 const hasDataGridSaveTarget = computed(() => !!props.tableMeta || !!props.customSaveHandler);
 const hasDataGridInsertTarget = computed(() => {
+  if (props.allowInsertRows === false) return false;
   const handler = props.customSaveHandler;
   if (handler) return handler.supportsInsert === true || handler.canInsert === true;
   return !!props.tableMeta && canInsertTableRows(props.databaseType);
 });
 const canInsertRows = computed(() => !!props.editable && hasDataGridInsertTarget.value);
-const canDeleteRows = computed(() => !props.customSaveHandler || props.customSaveHandler.canDelete !== false);
+const canDeleteRows = computed(() => props.allowDeleteRows !== false && (!props.customSaveHandler || props.customSaveHandler.canDelete !== false));
 watch(
   () => [props.databaseType, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
   async () => {
@@ -3916,6 +3945,7 @@ const showDataGridTopbar = computed(
     canShowWhereSearch.value ||
     hasSearchBarSlot.value ||
     showQueryEditReadyBadge.value ||
+    showQueryEditReadOnlyBadge.value ||
     props.context !== "results" ||
     (!!props.editable && hasDataGridSaveTarget.value) ||
     transactionActive.value ||
@@ -3993,6 +4023,11 @@ function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
   const columnName = props.sourceColumns?.[columnIndex] ?? props.result.columns[columnIndex];
   if (!columnName) return undefined;
   return props.tableMeta?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
+}
+
+function resultColumnInfoForGridColumn(columnIndex: number): Pick<ColumnInfo, "data_type"> | undefined {
+  const dataType = props.result.column_types?.[columnIndex]?.trim();
+  return dataType ? { data_type: dataType } : undefined;
 }
 
 function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKind | undefined {
@@ -5322,7 +5357,8 @@ function formatCell(value: CellValue, columnIndex?: number): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   const columnName = columnIndex === undefined ? undefined : props.result.columns[columnIndex];
   const columnInfo = columnIndex === undefined ? undefined : tableColumnForGridColumn(columnIndex);
-  const arrayDisplay = formatter ? undefined : dataGridCellDisplayText({ value, databaseType: props.databaseType, columnInfo });
+  const displayColumnInfo = columnInfo ?? (columnIndex === undefined ? undefined : resultColumnInfoForGridColumn(columnIndex));
+  const arrayDisplay = formatter ? undefined : dataGridCellDisplayText({ value, databaseType: props.databaseType, columnInfo: displayColumnInfo });
   if (arrayDisplay !== undefined) return arrayDisplay;
   const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnInfo?.data_type ?? (columnName ? columnTypeMap.value.get(columnName) : undefined));
   if (binaryDisplay) return binaryDisplay;
@@ -5363,7 +5399,13 @@ function draftCellPlaceholder(item: RowItem | undefined, columnIndex: number): s
   return item?.isDraft && item.data[columnIndex] === null ? t("grid.quickEntryDraftPlaceholder") : null;
 }
 
-watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000")], clearCellFormatCache);
+function columnTypeCacheSignature(): string {
+  const resultTypes = props.result.column_types?.join("\u0000") ?? "";
+  const tableTypes = props.tableMeta?.columns?.map((column) => `${column.name}:${column.data_type}`).join("\u0000") ?? "";
+  return `${resultTypes}\u0001${tableTypes}`;
+}
+
+watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000"), columnTypeCacheSignature()], clearCellFormatCache);
 
 function quoteIdent(name: string): string {
   return quoteTableIdentifier(props.databaseType, name);
@@ -8800,6 +8842,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </TooltipTrigger>
               <TooltipContent side="bottom" class="max-w-sm">
                 {{ t("grid.queryEditReadyHint", { table: queryEditReadyTargetLabel }) }}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip v-else-if="showQueryEditReadOnlyBadge">
+              <TooltipTrigger as-child>
+                <div class="flex h-5 items-center gap-1 rounded border border-muted-foreground/30 bg-muted/60 px-1.5 text-xs font-medium text-muted-foreground">
+                  {{ t("grid.queryEditReadOnly") }}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" class="max-w-sm">
+                {{ queryEditReadOnlyReason }}
               </TooltipContent>
             </Tooltip>
             <Tooltip v-if="showKeylessEditWarning">

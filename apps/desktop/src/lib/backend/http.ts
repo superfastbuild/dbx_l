@@ -97,6 +97,7 @@ import type {
   ExplainSqlBuildResult,
   DroppedFilePreviewSqlOptions,
   MongoGridFsFileInfo,
+  AppSupportInfo,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import type {
@@ -2100,6 +2101,17 @@ export async function downloadAndInstallUpdate(_source: UpdateDownloadSource, _l
 export async function getAppVersion(): Promise<string> {
   const res: { version: string } = await get("/api/version");
   return res.version;
+}
+
+export async function getAppSupportInfo(): Promise<AppSupportInfo> {
+  const appVersion = await getAppVersion();
+  return {
+    appVersion,
+    runtime: "web",
+    osName: navigator.platform || "web",
+    osVersion: null,
+    arch: "",
+  };
 }
 
 // ---------------------------------------------------------------------------
