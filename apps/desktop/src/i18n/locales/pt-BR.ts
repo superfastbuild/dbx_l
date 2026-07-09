@@ -554,7 +554,7 @@ export default withEnglishFallback({
     vector: "Vector",
     objects: "Objetos",
     users: "Usuários e Privilégios",
-    executionSummary: "Resumo de Execução",
+    executionSummary: "Resumo",
     tooltipTitle: "Título:",
     tooltipConnection: "Conexão:",
     tooltipDatabase: "Banco de dados:",
@@ -591,7 +591,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
   },
   executionSummary: {
-    empty: "Nenhum resumo de execução",
+    empty: "Nenhum resumo",
     executing: "Executando...",
     statement: "Instrução",
     type: "Tipo",

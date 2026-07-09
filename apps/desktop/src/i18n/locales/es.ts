@@ -553,7 +553,7 @@ export default withEnglishFallback({
     zookeeper: "ZooKeeper",
     vector: "Vector",
     users: "Usuarios y Privilegios",
-    executionSummary: "Resumen de ejecución",
+    executionSummary: "Resumen",
     mongo: "Mongo",
     objects: "Objetos",
     tooltipTitle: "Título:",
@@ -592,7 +592,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
   },
   executionSummary: {
-    empty: "Sin resumen de ejecución",
+    empty: "Sin resumen",
     executing: "Ejecutando...",
     statement: "Sentencia",
     type: "Tipo",

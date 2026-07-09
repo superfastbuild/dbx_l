@@ -553,7 +553,7 @@ export default withEnglishFallback({
     vector: "Vector",
     objects: "Oggetti",
     users: "Utenti e Privilegi",
-    executionSummary: "Riepilogo Esecuzione",
+    executionSummary: "Riepilogo",
     tooltipTitle: "Titolo:",
     tooltipConnection: "Connessione:",
     tooltipDatabase: "Database:",
@@ -590,7 +590,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
   },
   executionSummary: {
-    empty: "Nessun riepilogo esecuzione",
+    empty: "Nessun riepilogo",
     executing: "Esecuzione...",
     statement: "Istruzione",
     type: "Tipo",

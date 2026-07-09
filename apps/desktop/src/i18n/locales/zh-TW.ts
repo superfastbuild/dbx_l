@@ -554,7 +554,7 @@ export default withEnglishFallback({
     vector: "向量",
     objects: "物件",
     users: "使用者與權限",
-    executionSummary: "執行摘要",
+    executionSummary: "摘要",
     tooltipTitle: "標題：",
     tooltipConnection: "連線：",
     tooltipDatabase: "資料庫：",
@@ -591,7 +591,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
   },
   executionSummary: {
-    empty: "無執行摘要",
+    empty: "無摘要",
     executing: "執行中...",
     statement: "語句",
     type: "類型",

@@ -551,7 +551,7 @@ export default withEnglishFallback({
     mongo: "Mongo",
     objects: "オブジェクト",
     users: "ユーザーと権限",
-    executionSummary: "実行サマリー",
+    executionSummary: "サマリー",
     tooltipTitle: "タイトル:",
     tooltipConnection: "接続:",
     tooltipDatabase: "データベース:",
@@ -590,7 +590,7 @@ export default withEnglishFallback({
     gridfs: "GridFS",
   },
   executionSummary: {
-    empty: "実行サマリーはありません",
+    empty: "サマリーはありません",
     executing: "実行中...",
     statement: "ステートメント",
     type: "タイプ",

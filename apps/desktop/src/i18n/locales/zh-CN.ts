@@ -575,7 +575,7 @@ export default withEnglishFallback({
     vector: "向量",
     objects: "对象",
     users: "用户与权限",
-    executionSummary: "执行摘要",
+    executionSummary: "摘要",
     tooltipTitle: "标题：",
     tooltipConnection: "连接：",
     tooltipDatabase: "数据库：",
@@ -644,7 +644,7 @@ export default withEnglishFallback({
     fileDeleted: "\u5df2\u5220\u9664 {fileName}\u3002",
   },
   executionSummary: {
-    empty: "暂无执行摘要",
+    empty: "暂无摘要",
     executing: "正在执行...",
     statement: "语句",
     type: "类型",

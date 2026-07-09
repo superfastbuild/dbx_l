@@ -573,7 +573,7 @@ export default {
     vector: "Vector",
     objects: "Objects",
     users: "Users & Privileges",
-    executionSummary: "Execution Summary",
+    executionSummary: "Summary",
     tooltipTitle: "Title:",
     tooltipConnection: "Connection:",
     tooltipDatabase: "Database:",
@@ -642,7 +642,7 @@ export default {
     fileDeleted: "Deleted {fileName}.",
   },
   executionSummary: {
-    empty: "No execution summary",
+    empty: "No summary",
     executing: "Executing...",
     statement: "Statement",
     type: "Type",
