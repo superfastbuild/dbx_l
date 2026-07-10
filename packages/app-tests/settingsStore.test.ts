@@ -44,7 +44,7 @@ async function withMockLocalStorage(initial: Record<string, string>, run: () => 
 test("normalizes saved query result page size", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.pageSize, 100);
   assert.equal(normalizeEditorSettings({ pageSize: 5000 }).pageSize, 5000);
-  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 100000);
+  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 200000);
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
