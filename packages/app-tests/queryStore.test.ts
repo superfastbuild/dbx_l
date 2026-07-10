@@ -1686,6 +1686,7 @@ test("evicting cached tab results releases multi-result payloads and sessions", 
       await store.executeTabSql(tabId, `select ${i + 1}; select ${i + 1} as detail`);
     }
 
+    await waitFor(() => store.tabs.find((tab) => tab.id === tabIds[0])?.resultEvicted === true);
     const evicted = store.tabs.find((tab) => tab.id === tabIds[0]);
     assert.equal(executeCount, 7);
     assert.equal(evicted?.result, undefined);
@@ -1761,6 +1762,7 @@ test("result cache eviction keeps recently accessed inactive tabs", async () => 
     tabIds.push(tabId);
     await store.executeTabSql(tabId, "select 7");
 
+    await waitFor(() => store.tabs.find((tab) => tab.id === tabIds[1])?.resultEvicted === true);
     const recentlyViewed = store.tabs.find((tab) => tab.id === tabIds[0]);
     const leastRecentlyUsed = store.tabs.find((tab) => tab.id === tabIds[1]);
     assert.ok(recentlyViewed?.result);
