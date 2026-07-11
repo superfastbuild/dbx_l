@@ -17,10 +17,8 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
 use dbx_core::storage::Storage;
-use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
-
 use state::WebState;
+use tokio::sync::RwLock;
 
 fn web_body_limit_bytes() -> usize {
     const DEFAULT_MB: usize = 1024;
@@ -209,9 +207,6 @@ async fn main() {
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
     });
-
-    // CORS
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
 
     // API routes
     let api = Router::new()
@@ -594,8 +589,7 @@ async fn main() {
     let mut app = Router::new()
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(cors);
+        .layer(tower_http::trace::TraceLayer::new_for_http());
 
     // Static file serving
     if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {
