@@ -19,6 +19,7 @@ import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeFor
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import TreeItem from "./TreeItem.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -107,7 +108,7 @@ watch(deferredSearchQuery, (newQuery, oldQuery) => {
     .catch(() => {});
 });
 
-const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages"]);
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
 const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
 
@@ -520,6 +521,8 @@ function onSidebarScrollbarThumbPointerDown(event: PointerEvent) {
   window.addEventListener("pointercancel", stopSidebarScrollbarDrag);
 }
 
+const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
+
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
@@ -528,6 +531,7 @@ provide(sidebarTreeContextKey, {
     store.setSidebarTableSearchQuery(parentNodeId, query);
     scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
   },
+  registerPasteHandler: pasteHandlerRegistry.register,
 });
 
 const pendingRenameGroupId = ref<string | null>(null);
@@ -1032,8 +1036,8 @@ function requestSelectedSidebarPaste(): boolean {
     return true;
   }
   if (clipboard?.kind !== "table-copy" || clipboard.tables.length === 0 || !selectedNodeId) return false;
-  window.dispatchEvent(new CustomEvent("dbx:sidebar-request-paste-table", { detail: { nodeId: selectedNodeId } }));
-  return true;
+
+  return pasteHandlerRegistry.request(selectedNodeId);
 }
 
 onMounted(() => {

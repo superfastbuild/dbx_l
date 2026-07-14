@@ -111,6 +111,32 @@ pub async fn mongo_find_documents(
 }
 
 #[tauri::command]
+pub async fn mongo_count_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    filter: Option<String>,
+    mode: Option<String>,
+    execution_id: Option<String>,
+) -> Result<u64, String> {
+    let app = state.inner().clone();
+    crate::commands::document_cmd::run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_count_documents_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            filter.as_deref(),
+            mode.as_deref(),
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_server_version(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -263,6 +289,7 @@ pub async fn mongo_update_documents(
     filter_json: String,
     update_json: String,
     many: bool,
+    options_json: Option<String>,
 ) -> Result<u64, String> {
     ensure_connection_writable(&state, &connection_id, "Update").await?;
     dbx_core::mongo_ops::mongo_update_documents_core(
@@ -273,6 +300,7 @@ pub async fn mongo_update_documents(
         &filter_json,
         &update_json,
         many,
+        options_json.as_deref(),
     )
     .await
 }

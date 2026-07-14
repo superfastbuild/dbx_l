@@ -65,6 +65,17 @@ test("parseMongoFindCommand accepts Compass-style unquoted keys and ObjectId", (
   assert.deepEqual(JSON.parse(command.filter), { _id: { $oid: "6a045a92d2971e44243771a1" } });
 });
 
+test("parseMongoFindCommand does not rewrite NumberLong text inside strings", () => {
+  const command = parseMongoFindCommand('db.orders.find({label: "NumberLong(123)"})');
+  assert.deepEqual(command, {
+    collection: "orders",
+    filter: '{"label": "NumberLong(123)"}',
+    skip: 0,
+    limit: 100,
+    sort: undefined,
+  });
+});
+
 test("parseMongoFindCommand rewrites ISODate into extended JSON $date", () => {
   const command = parseMongoFindCommand(`db.trainingdocuments.find({
     createdAt: { $gte: ISODate("2025-02-25T04:57:39.965Z") }
@@ -80,6 +91,16 @@ test("parseMongoFindCommand rewrites new Date and single-quoted ISODate", () => 
   assert.deepEqual(JSON.parse(command.filter), {
     at: { $lt: { $date: "2025-01-01T00:00:00Z" }, $gte: { $date: "2024-01-01T00:00:00Z" } },
   });
+});
+
+test("parseMongoFindCommand rewrites NumberLong into extended JSON", () => {
+  const quoted = parseMongoFindCommand('db.orders.find({_id: NumberLong("2048938405781032962")})');
+  const unquoted = parseMongoFindCommand("db.orders.find({snowflake: NumberLong(9007199254740993)})");
+
+  assert.ok(quoted);
+  assert.deepEqual(JSON.parse(quoted.filter), { _id: { $numberLong: "2048938405781032962" } });
+  assert.ok(unquoted);
+  assert.deepEqual(JSON.parse(unquoted.filter), { snowflake: { $numberLong: "9007199254740993" } });
 });
 
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
@@ -141,6 +162,27 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
     update: '{"$set": {"stock": 3}}',
     many: false,
   });
+});
+
+test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.issue_3231.updateMany(
+      { msgType: 3, "order.orderId": { $in: [12345] } },
+      { $set: { "order.$[orderElem].bcorderproducts.$[prodElem].pankouType": "双双2" } },
+      { arrayFilters: [
+        { "orderElem.orderId": { $in: [12345] } },
+        { "prodElem.id": 322678 }
+      ] }
+    )`),
+    {
+      kind: "update",
+      collection: "issue_3231",
+      filter: '{ "msgType": 3, "order.orderId": { "$in": [12345] } }',
+      update: '{ "$set": { "order.$[orderElem].bcorderproducts.$[prodElem].pankouType": "双双2" } }',
+      options: '{ "arrayFilters": [\n        { "orderElem.orderId": { "$in": [12345] } },\n        { "prodElem.id": 322678 }\n      ] }',
+      many: true,
+    },
+  );
 });
 
 test("parseMongoWriteCommand parses createIndex with optional options", () => {
@@ -231,6 +273,7 @@ test("parseMongoCountDocumentsCommand parses db collection countDocuments", () =
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.countDocuments({})"), {
     collection: "products",
     filter: "{}",
+    mode: "accurate",
   });
 });
 
@@ -238,20 +281,24 @@ test("parseMongoCountDocumentsCommand parses legacy count helpers", () => {
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.count({ active: true })"), {
     collection: "products",
     filter: '{ "active": true }',
+    mode: "legacy",
   });
   assert.deepEqual(parseMongoCountDocumentsCommand('db.getCollection("audit.logs").count()'), {
     collection: "audit.logs",
     filter: "{}",
+    mode: "legacy",
   });
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.find({ active: true }).count()"), {
     collection: "products",
     filter: '{ "active": true }',
+    mode: "legacy",
   });
   assert.equal(parseMongoFindCommand("db.products.find({ active: true }).count()"), null);
   assert.deepEqual(parseMongoCommand("db.products.find({ active: true }).count()")?.command, {
     kind: "countDocuments",
     collection: "products",
     filter: '{ "active": true }',
+    mode: "legacy",
   });
 });
 
@@ -480,9 +527,21 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
     ["1", "Ada", '{"role":"admin"}', null],
     ["2", "Lin", null, true],
   ]);
+  assert.deepEqual(result.mongo_documents, [
+    { _id: "1", name: "Ada", profile: { role: "admin" } },
+    { _id: "2", active: true, name: "Lin" },
+  ]);
   assert.equal(result.affected_rows, 12);
   assert.equal(result.execution_time_ms, 5);
   assert.equal(result.truncated, true);
+});
+
+test("mongoDocumentsToQueryResult displays typed int64 ids without losing raw type metadata", () => {
+  const id = { $numberLong: "2048938405781032962" };
+  const result = mongoDocumentsToQueryResult([{ _id: id, name: "snowflake" }], 1, 1);
+
+  assert.deepEqual(result.rows, [["2048938405781032962", "snowflake"]]);
+  assert.deepEqual(result.mongo_documents, [{ _id: id, name: "snowflake" }]);
 });
 
 test("buildMongoUpdateDocument ignores _id and preserves typed values", () => {

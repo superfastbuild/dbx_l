@@ -121,6 +121,50 @@ pub async fn mongo_find_documents_core(
     .await
 }
 
+pub async fn mongo_count_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter: Option<&str>,
+    mode: Option<&str>,
+) -> Result<u64, String> {
+    let accurate = mode != Some("legacy");
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::count_documents(client, database, collection, filter, accurate).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "filter": filter,
+                "accurate": accurate,
+            });
+            match client.mongo_count_documents(params.clone()).await {
+                Ok(total) => Ok(total),
+                Err(error) if is_unknown_agent_method_error(&error, "count_documents") => {
+                    let result: MongoDocumentResult = client
+                        .mongo_find_documents(serde_json::json!({
+                            "database": database,
+                            "collection": collection,
+                            "skip": 0,
+                            "limit": 1,
+                            "filter": filter,
+                        }))
+                        .await?;
+                    Ok(result.total)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 /// Read MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
 #[allow(clippy::too_many_arguments)]
 pub async fn mongo_find_documents_extended_json_core(
@@ -315,12 +359,14 @@ pub async fn mongo_update_documents_core(
     filter_json: &str,
     update_json: &str,
     many: bool,
+    options_json: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many).await
+            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many, options_json)
+                .await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -331,6 +377,7 @@ pub async fn mongo_update_documents_core(
                     "filter_json": filter_json,
                     "update_json": update_json,
                     "many": many,
+                    "options_json": options_json,
                 }))
                 .await?;
             Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))

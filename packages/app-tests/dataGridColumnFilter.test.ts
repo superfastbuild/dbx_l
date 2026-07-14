@@ -1,9 +1,17 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, filterModeHasCompleteValue, filterModeIsSupportedForDatabase, parseFilterValue, parseFilterValues } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
+import { buildDataGridContextFilterCondition } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
+
+let lastContextFilterOptions: Record<string, unknown> | undefined;
 
 function installFilterFetchMock() {
   globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/query/build-data-grid-context-filter-condition") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      lastContextFilterOptions = body.options;
+      return new Response(JSON.stringify("mock condition"), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (String(input) === "/api/query/build-data-grid-column-values-filter-condition") {
       const body = JSON.parse(String(init?.body ?? "{}"));
       const options = body.options;
@@ -73,4 +81,73 @@ test("builds multi-value server-side column filters", async () => {
   });
 
   assert.equal(condition, `("status" IS NULL OR "status" IN ('active', 'pending'))`);
+});
+
+test("parses comma and newline separated structured IN values", () => {
+  const values = parseFilterValues(`alpha, 'beta,gamma'\n42\nNULL\n"NULL"\n'it''s'`, { data_type: "int" });
+
+  assert.deepEqual(values, ["alpha", "beta,gamma", "42", null, "NULL", "it's"]);
+  assert.deepEqual(parseFilterValues('a,,\n"b""c",d\te'), ["a", 'b"c', "d\te"]);
+});
+
+test("parses typed structured IN values without losing large integers", () => {
+  assert.deepEqual(parseFilterValues("true, false", { data_type: "boolean" }), [true, false]);
+  assert.deepEqual(parseFilterValues("9007199254740993", { data_type: "bigint" }), ["9007199254740993"]);
+  assert.deepEqual(parseFilterValues("0.123456789012345678", { data_type: "decimal(38,18)" }), ["0.123456789012345678"]);
+  assert.equal(parseFilterValue("0.123456789012345678", { data_type: "decimal(38,18)" }), "0.123456789012345678");
+  assert.deepEqual(parseFilterValues("true, false", { data_type: "bit(1)" }, "postgres"), ["true", "false"]);
+  assert.equal(parseFilterValue("true", { data_type: "bit varying" }, "postgres"), "true");
+  assert.equal(parseFilterValue("true", { data_type: "bit" }, "sqlserver"), true);
+});
+
+test("hides list and range modes for unsupported dialects", () => {
+  for (const databaseType of ["cassandra", "influxdb", "jdbc"] as const) {
+    assert.equal(filterModeIsSupportedForDatabase("in", databaseType), false);
+    assert.equal(filterModeIsSupportedForDatabase("not-in", databaseType), false);
+    assert.equal(filterModeIsSupportedForDatabase("between", databaseType), false);
+    assert.equal(filterModeIsSupportedForDatabase("not-between", databaseType), false);
+  }
+  assert.equal(filterModeIsSupportedForDatabase("between", "postgres"), true);
+  assert.equal(filterModeIsSupportedForDatabase("is-null", "influxdb"), true);
+});
+
+test("requires usable values for structured list and range filters", () => {
+  assert.equal(filterModeHasCompleteValue("in", " , \n "), false);
+  assert.equal(filterModeHasCompleteValue("not-in", "active, pending"), true);
+  assert.equal(filterModeHasCompleteValue("between", "10", ""), false);
+  assert.equal(filterModeHasCompleteValue("not-between", "10", "20"), true);
+  assert.equal(filterModeHasCompleteValue("is-null", "", ""), true);
+});
+
+test("passes list and range values through the shared context filter API", async () => {
+  installFilterFetchMock();
+  await buildDataGridContextFilterCondition({
+    databaseType: "postgres",
+    columnName: "id",
+    mode: "in",
+    value: null,
+    values: [1, 2, null],
+  });
+  assert.deepEqual(lastContextFilterOptions, {
+    databaseType: "postgres",
+    columnName: "id",
+    mode: "in",
+    value: null,
+    values: [1, 2, null],
+  });
+
+  await buildDataGridContextFilterCondition({
+    databaseType: "sqlserver",
+    columnName: "created_at",
+    mode: "not-between",
+    value: 10,
+    endValue: 20,
+  });
+  assert.deepEqual(lastContextFilterOptions, {
+    databaseType: "sqlserver",
+    columnName: "created_at",
+    mode: "not-between",
+    value: 10,
+    endValue: 20,
+  });
 });

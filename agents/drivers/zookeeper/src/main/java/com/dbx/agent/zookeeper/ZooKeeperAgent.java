@@ -386,6 +386,11 @@ public final class ZooKeeperAgent {
 
     private static Map<String, Object> valueObject(byte[] bytes) {
         Map<String, Object> value = new LinkedHashMap<>();
+        // ZooKeeper represents znodes created without a data payload as null.
+        // Expose them as empty UTF-8 values instead of passing null to decoders.
+        if (bytes == null) {
+            bytes = new byte[0];
+        }
         String utf8 = strictUtf8(bytes);
         if (utf8 != null) {
             value.put("encoding", "utf8");
